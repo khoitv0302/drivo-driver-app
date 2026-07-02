@@ -1,0 +1,42 @@
+{
+  "expo": {
+    "name": "drivo-driver-app",
+    "slug": "drivo-driver-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.thanhtv62929.drivodriverapp",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSLocationWhenInUseUsageDescription": "Drivo cần truy cập vị trí để xác định vị trí của bạn và tìm chuyến gần bạn.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Drivo cần truy cập vị trí để tài khách hàng theo dõi hành trình khi bạn đang chở khách."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "softwareKeyboardLayoutMode": "pan",
+      "predictiveBackGestureEnabled": false,
+      "package": "com.thanhtv62929.drivodriverapp",
+      "permissions": [
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-location",
+      "@rnmapbox/maps"
+    ]
+  }
+}
