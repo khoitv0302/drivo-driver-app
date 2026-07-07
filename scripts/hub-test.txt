@@ -1,0 +1,135 @@
+/**
+ * Test gửi location lên /hubs/driver bằng Node — không dính CORS.
+ *
+ * Chạy:   node scripts/hub-test.js
+ * Dừng:   Ctrl+C
+ *
+ * Flow: login lấy token → connect hub → invoke UpdateLocation mỗi 5s
+ *       → lắng nghe event "offer" từ server.
+ */
+const signalR = require('@microsoft/signalr');
+
+// ════════════════════════════════════════════════════════════════════
+// CONFIG — HARDCODE TẤT CẢ Ở ĐÂY
+// ════════════════════════════════════════════════════════════════════
+const API_URL = 'http://dev-api.160-250-5-174.sslip.io:8080/api';
+const HUB_URL = 'http://dev-api.160-250-5-174.sslip.io:8080/hubs/driver';
+
+// Cách 1: dán thẳng token (bỏ qua bước login nếu có giá trị)
+let ACCESS_TOKEN = '';
+
+// Cách 2: để trống token — script tự POST /auth/login lấy token
+const LOGIN_PHONE = '+84969668834';
+const LOGIN_PASSWORD = '321998Tvk!';
+
+// Payload gửi vào UpdateLocation
+const PAYLOAD = {
+  lat: 10.5354,
+  lng: 106.4137,
+  vehicleType: 'car_auto', // key của set geo:online:{vehicleType}
+  heading: 0,
+  speed: 0,
+};
+
+const HUB_METHOD = 'UpdateLocation';
+const OFFER_EVENT = 'offer';
+const INTERVAL_MS = 5000;
+// ════════════════════════════════════════════════════════════════════
+
+// ── Log màu + timestamp ─────────────────────────────────────────────
+const C = { ok: '\x1b[32m', err: '\x1b[31m', up: '\x1b[36m', down: '\x1b[33m', dim: '\x1b[90m', reset: '\x1b[0m' };
+function log(msg, color = C.dim) {
+  const t = new Date().toTimeString().slice(0, 8) + '.' + String(Date.now() % 1000).padStart(3, '0');
+  console.log(`${C.dim}[${t}]${C.reset} ${color}${msg}${C.reset}`);
+}
+
+function decodeJwt(token) {
+  try {
+    const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(Buffer.from(b64, 'base64').toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+// ── Login ───────────────────────────────────────────────────────────
+async function login() {
+  log(`→ POST ${API_URL}/auth/login (phone: ${LOGIN_PHONE})`, C.up);
+  const res = await fetch(`${API_URL}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ phone: LOGIN_PHONE, password: LOGIN_PASSWORD }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    log(`✗ Login thất bại HTTP ${res.status}: ${JSON.stringify(data)}`, C.err);
+    process.exit(1);
+  }
+  log(`✓ Login OK — userId=${data.userId}, roles=[${(data.roles || []).join(', ')}], driverStatus=${data.driverStatus}`, C.ok);
+  const claims = decodeJwt(data.accessToken);
+  if (claims) log(`  JWT claims: ${JSON.stringify(claims)}`);
+  return data.accessToken;
+}
+
+// ── Gửi UpdateLocation ──────────────────────────────────────────────
+async function sendLocation(connection) {
+  log(`↑ invoke ${HUB_METHOD}(${JSON.stringify(PAYLOAD)})`, C.up);
+  try {
+    // invoke = chờ server chạy xong method và trả completion — xác nhận 2 chiều thật
+    const result = await connection.invoke(HUB_METHOD, PAYLOAD);
+    log(`✓ SERVER ĐÃ XỬ LÝ ${HUB_METHOD}${result != null ? ' — trả về: ' + JSON.stringify(result) : ''}`, C.ok);
+  } catch (err) {
+    log(`✗ SERVER TỪ CHỐI: ${err.message}`, C.err);
+    log('  ("Method does not exist" = sai tên method · "arguments" = sai kiểu/số tham số · còn lại = exception trong hub)');
+  }
+}
+
+// ── Main ────────────────────────────────────────────────────────────
+async function main() {
+  if (!ACCESS_TOKEN) ACCESS_TOKEN = await login();
+
+  const connection = new signalR.HubConnectionBuilder()
+    .withUrl(HUB_URL, {
+      accessTokenFactory: () => ACCESS_TOKEN,
+      transport: signalR.HttpTransportType.WebSockets, // giống hệt app RN
+    })
+    .withAutomaticReconnect()
+    .configureLogging(signalR.LogLevel.Information)
+    .build();
+
+  connection.onreconnecting((err) => log(`⟳ reconnecting: ${err?.message ?? ''}`, C.err));
+  connection.onreconnected(() => log('✓ reconnected', C.ok));
+  connection.onclose((err) => log(`⏹ closed: ${err?.message ?? '(chủ động)'}`, C.err));
+
+  // Nhận event offer từ server
+  connection.on(OFFER_EVENT, (...args) => {
+    log(`⇩ ${OFFER_EVENT}: ${JSON.stringify(args.length > 1 ? args : args[0], null, 2)}`, C.down);
+  });
+
+  log(`→ đang kết nối ${HUB_URL} ...`, C.up);
+  try {
+    await connection.start();
+    log(`✓ KẾT NỐI THÀNH CÔNG — connectionId=${connection.connectionId ?? '(n/a)'}`, C.ok);
+  } catch (err) {
+    log(`✗ KẾT NỐI THẤT BẠI: ${err.message}`, C.err);
+    log('  401 = token sai/hết hạn · 403 = token đúng nhưng thiếu quyền (role/driverStatus) · khác = mạng/URL');
+    process.exit(1);
+  }
+
+  // Gửi ngay 1 lần rồi lặp mỗi 5s
+  await sendLocation(connection);
+  const timer = setInterval(() => sendLocation(connection), INTERVAL_MS);
+  log(`▶ auto-send mỗi ${INTERVAL_MS / 1000}s — Ctrl+C để dừng`);
+
+  process.on('SIGINT', async () => {
+    clearInterval(timer);
+    log('⏹ đang ngắt kết nối...');
+    await connection.stop();
+    process.exit(0);
+  });
+}
+
+main().catch((err) => {
+  log(`✗ Lỗi không xử lý được: ${err.message}`, C.err);
+  process.exit(1);
+});

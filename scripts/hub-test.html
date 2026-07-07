@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8" />
+<title>Drivo — Test /hubs/driver</title>
+<!-- SignalR client chính thức từ CDN -->
+<script src="https://cdn.jsdelivr.net/npm/@microsoft/signalr@8.0.7/dist/browser/signalr.min.js"></script>
+<style>
+  body { font-family: Consolas, monospace; background: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }
+  h1 { font-size: 18px; color: #38bdf8; }
+  .row { margin: 10px 0; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  button { padding: 8px 16px; border: 0; border-radius: 6px; cursor: pointer; font-weight: bold; font-family: inherit; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-green { background: #16a34a; color: white; }
+  .btn-red { background: #dc2626; color: white; }
+  .btn-blue { background: #2563eb; color: white; }
+  .btn-amber { background: #d97706; color: white; }
+  #state { padding: 4px 12px; border-radius: 999px; font-weight: bold; background: #334155; }
+  #state.connected { background: #16a34a; }
+  #state.connecting, #state.reconnecting { background: #d97706; }
+  #log { background: #020617; border: 1px solid #334155; border-radius: 8px; padding: 12px;
+         height: 420px; overflow-y: auto; font-size: 13px; white-space: pre-wrap; }
+  .t-ok { color: #4ade80; } .t-err { color: #f87171; } .t-info { color: #94a3b8; }
+  .t-up { color: #38bdf8; } .t-down { color: #facc15; }
+  textarea { width: 100%; height: 60px; background: #1e293b; color: #e2e8f0; border: 1px solid #334155;
+             border-radius: 6px; font-family: inherit; font-size: 12px; padding: 8px; box-sizing: border-box; }
+</style>
+</head>
+<body>
+<h1>🚗 Drivo — Test gửi location lên /hubs/driver</h1>
+
+<script>
+// ════════════════════════════════════════════════════════════════════
+// CONFIG — HARDCODE TẤT CẢ Ở ĐÂY
+// ════════════════════════════════════════════════════════════════════
+const HUB_URL = 'http://dev-api.160-250-5-174.sslip.io:8080/hubs/driver';
+
+// Cách 1: dán thẳng access token vào đây (lấy từ response /auth/login)
+let ACCESS_TOKEN = '';
+
+// Cách 2: để trống token ở trên và điền phone/password — bấm nút "Login" để tự lấy token.
+// (Nếu trình duyệt chặn CORS ở bước login thì dùng Cách 1.)
+const API_URL = 'http://dev-api.160-250-5-174.sslip.io:8080/api';
+const LOGIN_PHONE = '+84969668834';
+const LOGIN_PASSWORD = 'your-password-here';
+
+// Payload gửi vào UpdateLocation — chỉnh tuỳ ý
+const PAYLOAD = {
+  lat: 10.5354,
+  lng: 106.4137,
+  vehicleType: 'car_auto', // key của set geo:online:{vehicleType}
+  heading: 0,
+  speed: 0,
+};
+
+const HUB_METHOD = 'UpdateLocation'; // method phía server
+const OFFER_EVENT = 'offer';         // event server push chuyến mời
+const INTERVAL_MS = 5000;            // nhịp auto-send
+
+// true = bỏ qua bước negotiate (HTTP) và mở thẳng WebSocket → NÉ ĐƯỢC CORS.
+// Chỉ hoạt động với backend .NET tự host (không phải Azure SignalR Service).
+const SKIP_NEGOTIATION = true;
+// ════════════════════════════════════════════════════════════════════
+</script>
+
+<div class="row">
+  Trạng thái: <span id="state">disconnected</span>
+</div>
+<div class="row">
+  <button class="btn-amber" onclick="doLogin()">1️⃣ Login lấy token</button>
+  <button class="btn-green" id="btnConnect" onclick="connect()">2️⃣ Connect hub</button>
+  <button class="btn-red" id="btnDisconnect" onclick="disconnect()" disabled>Disconnect</button>
+</div>
+<div class="row">
+  <button class="btn-blue" id="btnSend" onclick="sendOnce()" disabled>3️⃣ Gửi UpdateLocation 1 lần</button>
+  <button class="btn-blue" id="btnAuto" onclick="toggleAuto()" disabled>▶️ Auto gửi mỗi 5s</button>
+</div>
+<div class="row">Payload (sửa được, JSON):</div>
+<textarea id="payload"></textarea>
+<div class="row">
+  <button class="btn-red" onclick="document.getElementById('log').innerHTML = ''">Xoá log</button>
+</div>
+<div id="log"></div>
+
+<script>
+let connection = null;
+let autoTimer = null;
+
+document.getElementById('payload').value = JSON.stringify(PAYLOAD, null, 2);
+
+// ── Log ra trang + console ──────────────────────────────────────────
+function log(msg, cls = 't-info') {
+  const el = document.getElementById('log');
+  const time = new Date().toLocaleTimeString('vi-VN', { hour12: false }) +
+    '.' + String(new Date().getMilliseconds()).padStart(3, '0');
+  el.innerHTML += `<span class="${cls}">[${time}] ${msg}</span>\n`;
+  el.scrollTop = el.scrollHeight;
+  console.log(`[${time}] ${msg.replace(/<[^>]*>/g, '')}`);
+}
+
+function setUiState(state) {
+  const s = document.getElementById('state');
+  s.textContent = state;
+  s.className = state;
+  const connected = state === 'connected';
+  document.getElementById('btnConnect').disabled = state !== 'disconnected';
+  document.getElementById('btnDisconnect').disabled = state === 'disconnected';
+  document.getElementById('btnSend').disabled = !connected;
+  document.getElementById('btnAuto').disabled = !connected;
+}
+
+// ── Login lấy token (nếu không muốn dán tay) ────────────────────────
+async function doLogin() {
+  log(`→ POST ${API_URL}/auth/login (phone: ${LOGIN_PHONE})`, 't-up');
+  try {
+    const res = await fetch(`${API_URL}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone: LOGIN_PHONE, password: LOGIN_PASSWORD }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      log(`✗ Login thất bại HTTP ${res.status}: ${JSON.stringify(data)}`, 't-err');
+      return;
+    }
+    ACCESS_TOKEN = data.accessToken;
+    log(`✓ Login OK — userId=${data.userId}, roles=[${(data.roles || []).join(', ')}], driverStatus=${data.driverStatus}`, 't-ok');
+    log(`  token: ${ACCESS_TOKEN.slice(0, 40)}...`, 't-info');
+    // Decode payload JWT để soi claims
+    try {
+      const claims = JSON.parse(atob(ACCESS_TOKEN.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      log(`  JWT claims: ${JSON.stringify(claims, null, 2)}`, 't-info');
+    } catch {}
+  } catch (err) {
+    log(`✗ Login lỗi mạng/CORS: ${err.message} — nếu CORS thì dán token thủ công vào ACCESS_TOKEN`, 't-err');
+  }
+}
+
+// ── Connect / Disconnect ────────────────────────────────────────────
+async function connect() {
+  if (!ACCESS_TOKEN) {
+    log('✗ Chưa có token — bấm Login hoặc dán vào ACCESS_TOKEN trong source', 't-err');
+    return;
+  }
+
+  connection = new signalR.HubConnectionBuilder()
+    .withUrl(HUB_URL, {
+      accessTokenFactory: () => ACCESS_TOKEN,
+      ...(SKIP_NEGOTIATION
+        ? { skipNegotiation: true, transport: signalR.HttpTransportType.WebSockets }
+        : {}),
+    })
+    .withAutomaticReconnect()
+    .configureLogging(signalR.LogLevel.Information)
+    .build();
+
+  connection.onreconnecting((err) => { setUiState('reconnecting'); log(`⟳ reconnecting: ${err?.message ?? ''}`, 't-err'); });
+  connection.onreconnected(() => { setUiState('connected'); log('✓ reconnected', 't-ok'); });
+  connection.onclose((err) => { setUiState('disconnected'); stopAuto(); log(`⏹ closed: ${err?.message ?? '(chủ động)'}`, 't-err'); });
+
+  // Nhận event offer từ server
+  connection.on(OFFER_EVENT, (...args) => {
+    log(`⇩ ${OFFER_EVENT}: ${JSON.stringify(args.length > 1 ? args : args[0], null, 2)}`, 't-down');
+  });
+
+  setUiState('connecting');
+  log(`→ đang kết nối ${HUB_URL} (skipNegotiation=${SKIP_NEGOTIATION})`, 't-up');
+  try {
+    await connection.start();
+    setUiState('connected');
+    log(`✓ KẾT NỐI THÀNH CÔNG — connectionId=${connection.connectionId ?? '(n/a)'}`, 't-ok');
+  } catch (err) {
+    setUiState('disconnected');
+    log(`✗ KẾT NỐI THẤT BẠI: ${err.message}`, 't-err');
+    log('  401 = token sai/hết hạn · 403 = token đúng nhưng thiếu quyền (role/driverStatus) · lỗi khác = mạng/CORS/URL', 't-info');
+  }
+}
+
+async function disconnect() {
+  stopAuto();
+  if (connection) await connection.stop();
+  setUiState('disconnected');
+}
+
+// ── Gửi UpdateLocation ──────────────────────────────────────────────
+async function sendOnce() {
+  let payload;
+  try {
+    payload = JSON.parse(document.getElementById('payload').value);
+  } catch {
+    log('✗ Payload không phải JSON hợp lệ', 't-err');
+    return;
+  }
+  log(`↑ invoke ${HUB_METHOD}(${JSON.stringify(payload)})`, 't-up');
+  try {
+    // invoke = chờ server chạy xong method và trả completion về
+    const result = await connection.invoke(HUB_METHOD, payload);
+    log(`✓ SERVER ĐÃ XỬ LÝ ${HUB_METHOD}${result !== undefined && result !== null ? ' — trả về: ' + JSON.stringify(result) : ''}`, 't-ok');
+  } catch (err) {
+    log(`✗ SERVER TỪ CHỐI: ${err.message}`, 't-err');
+    log('  ("Method does not exist" = sai tên method · "arguments" = sai kiểu/số tham số · còn lại = exception trong hub, backend bật EnableDetailedErrors để thấy chi tiết)', 't-info');
+  }
+}
+
+function toggleAuto() {
+  if (autoTimer) { stopAuto(); return; }
+  sendOnce();
+  autoTimer = setInterval(sendOnce, INTERVAL_MS);
+  document.getElementById('btnAuto').textContent = '⏸ Dừng auto';
+  log(`▶ auto-send mỗi ${INTERVAL_MS / 1000}s`, 't-info');
+}
+
+function stopAuto() {
+  if (!autoTimer) return;
+  clearInterval(autoTimer);
+  autoTimer = null;
+  document.getElementById('btnAuto').textContent = '▶️ Auto gửi mỗi 5s';
+  log('⏸ đã dừng auto-send', 't-info');
+}
+</script>
+</body>
+</html>

@@ -3,17 +3,27 @@
     "version": ">= 16.0.0"
   },
   "build": {
+    "base": {
+      "node": "24.14.0"
+    },
     "development": {
+      "extends": "base",
       "developmentClient": true,
       "distribution": "internal",
+      "environment": "development",
       "env": {
         "EXPO_PUBLIC_APP_ENV": "development"
       }
     },
     "preview": {
-      "distribution": "internal"
+      "extends": "base",
+      "distribution": "internal",
+      "environment": "preview"
     },
-    "production": {}
+    "production": {
+      "extends": "base",
+      "environment": "production"
+    }
   },
   "submit": {
     "production": {}

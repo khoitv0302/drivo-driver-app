@@ -6,7 +6,6 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import Mapbox from '@rnmapbox/maps';
 import RootNavigator from './src/navigation/RootNavigator';
 import { MAPBOX_PUBLIC_TOKEN } from './src/constants/config';
-import './src/services/api/interceptors';
 
 Mapbox.setAccessToken(MAPBOX_PUBLIC_TOKEN);
 
