@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ActivityIndicator, Linking, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Linking, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { ROUTES } from '../../../constants/routes';
@@ -41,6 +41,8 @@ export default function ActiveTripScreen({ route, navigation }: RootScreenProps<
     phase,
     rating,
     setRating,
+    comment,
+    setComment,
     leg,
     wait,
     advance,
@@ -125,16 +127,13 @@ export default function ActiveTripScreen({ route, navigation }: RootScreenProps<
       {/* ── Nút nổi bên phải bản đồ ── */}
       {isMapPhase && (
         <View style={[styles.floatCol, { bottom: bottomSheetHeight() + 16 }]}>
-          {phase === 'on_trip' && (
+          {phase === 'at_dropoff' && (
             <TouchableOpacity style={styles.floatBtn} activeOpacity={0.85}>
-              <Ionicons name="shield-checkmark-outline" size={20} color="#2563EB" />
+              <Ionicons name="chatbubble-ellipses-outline" size={20} color="#2563EB" />
             </TouchableOpacity>
           )}
-          <TouchableOpacity style={styles.floatBtn} activeOpacity={0.85}>
-            <Ionicons name="chatbubble-ellipses-outline" size={20} color="#2563EB" />
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.floatBtn} activeOpacity={0.85} onPress={() => setNavSheetVisible(true)}>
-            <Ionicons name="navigate" size={20} color="#2563EB" />
+          <TouchableOpacity style={styles.navFloatBtn} activeOpacity={0.85} onPress={() => setNavSheetVisible(true)}>
+            <Ionicons name="navigate" size={22} color="#2563EB" />
           </TouchableOpacity>
         </View>
       )}
@@ -362,6 +361,15 @@ export default function ActiveTripScreen({ route, navigation }: RootScreenProps<
               </TouchableOpacity>
             ))}
           </View>
+          <TextInput
+            style={styles.commentInput}
+            placeholder="Nhận xét về khách hàng (không bắt buộc)"
+            placeholderTextColor="#9ca3af"
+            multiline
+            numberOfLines={3}
+            value={comment}
+            onChangeText={setComment}
+          />
         </View>
 
         <View style={{ height: 16 }} />
@@ -549,6 +557,21 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     ...SHADOW,
   },
+  navFloatBtn: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: 'white',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#2563EB',
+    shadowColor: '#2563EB',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+    elevation: 8,
+  },
 
   bottomSheet: {
     position: 'absolute',
@@ -644,6 +667,18 @@ const styles = StyleSheet.create({
 
   rateLabel: { fontSize: 13, fontWeight: '700', color: '#111827', marginTop: 16, marginBottom: 12, textAlign: 'center' },
   starsRow: { flexDirection: 'row', justifyContent: 'center' },
+  commentInput: {
+    marginTop: 16,
+    minHeight: 80,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 12,
+    padding: 12,
+    fontSize: 13,
+    color: '#111827',
+    textAlignVertical: 'top',
+    backgroundColor: '#f9fafb',
+  },
 
   // Hero màn hoàn thành
   heroWrap: { alignItems: 'center', paddingTop: 8, paddingBottom: 20 },

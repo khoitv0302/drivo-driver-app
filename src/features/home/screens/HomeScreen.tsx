@@ -66,7 +66,7 @@ export default function HomeScreen({ navigation }: MainTabScreenProps<'Home'>) {
       offerId: parsed.offerId,
       bookingId: parsed.bookingId,
       trip: offerToIncomingTrip(parsed),
-      customer: { name: parsed.customer.fullName, rating: parsed.customer.rating ?? 0 },
+      customer: { name: parsed.customer.fullName, rating: parsed.customer.rating ?? 5 },
     });
   });
 
@@ -94,7 +94,7 @@ export default function HomeScreen({ navigation }: MainTabScreenProps<'Home'>) {
       const { tripId, status, counterparty } = tripReady.data.trip;
       const customer = {
         name: counterparty.fullName,
-        rating: counterparty.rating ?? 0,
+        rating: counterparty.rating ?? 5,
         phone: counterparty.phone,
       };
       setPendingTrip(null);

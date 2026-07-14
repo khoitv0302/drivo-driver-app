@@ -64,6 +64,7 @@ function fallbackDriverStart(pickup: [number, number]): [number, number] {
 export function useActiveTrip(trip: ActiveTripData) {
   const [phase, setPhase] = useState<ActiveTripPhase>(() => mapStatusToPhase(trip.status));
   const [rating, setRating] = useState(0);
+  const [comment, setComment] = useState('');
   const [leg, setLeg] = useState<LegInfo | null>(null);
   // Cước thực tế backend chốt sau khi báo đã đến điểm trả khách (POST /trips/{id}/arrived-destination).
   const [fareResult, setFareResult] = useState<ArrivedDestinationResult | null>(null);
@@ -225,6 +226,8 @@ export function useActiveTrip(trip: ActiveTripData) {
     phase,
     rating,
     setRating,
+    comment,
+    setComment,
     leg,
     wait,
     advance,

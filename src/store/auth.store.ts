@@ -13,12 +13,16 @@ export interface AuthSession {
   refreshToken: string;
   userId: string;
   roles: string[];
+  expiresAt: string; // ISO/UTC — thời điểm accessToken hết hạn, do backend trả về
   driverStatus: string;
 }
 
 interface AuthState {
   token: string | null; // = accessToken; RootNavigator dùng để gate auth
   refreshToken: string | null; // giữ trong RAM cho interceptor; nguồn bền vững là SecureStore
+  // Nguồn DUY NHẤT để biết access token còn hạn hay không — cả API interceptor lẫn SignalR
+  // accessTokenFactory (services/auth/tokenRefresh.ts) đều đọc từ đây, không tự decode JWT riêng.
+  expiresAt: string | null;
   userId: string | null;
   roles: string[];
   driverStatus: string | null;
@@ -34,6 +38,7 @@ export const useAuthStore = create<AuthState>()(
     (set) => ({
       token: null,
       refreshToken: null,
+      expiresAt: null,
       userId: null,
       roles: [],
       driverStatus: null,
@@ -60,6 +65,7 @@ export const useAuthStore = create<AuthState>()(
         set({
           token: session.accessToken,
           refreshToken: session.refreshToken,
+          expiresAt: session.expiresAt,
           userId: session.userId,
           roles: session.roles,
           driverStatus: session.driverStatus,
@@ -67,20 +73,34 @@ export const useAuthStore = create<AuthState>()(
       },
       clearToken: () => {
         deleteRefreshToken().catch(() => {});
-        set({ token: null, refreshToken: null, userId: null, roles: [], driverStatus: null });
+        set({
+          token: null,
+          refreshToken: null,
+          expiresAt: null,
+          userId: null,
+          roles: [],
+          driverStatus: null,
+        });
       },
       _setHydrated: () => set({ _hasHydrated: true }),
     }),
     {
       name: 'drivo-driver-auth',
       storage: createJSONStorage(() => AsyncStorage),
-      // v1: shape mới (session đầy đủ). State v0 cũ chứa mock token từ thời chưa có API
-      // → migrate bỏ hết, bắt đăng nhập lại bằng phiên thật.
-      version: 1,
-      migrate: () => ({ token: null, userId: null, roles: [], driverStatus: null }),
+      // v2: thêm expiresAt (bắt buộc để tự refresh chủ động). Phiên v1 cũ không có field này
+      // → migrate bỏ hết, bắt đăng nhập lại để có expiresAt thật từ backend.
+      version: 2,
+      migrate: () => ({
+        token: null,
+        expiresAt: null,
+        userId: null,
+        roles: [],
+        driverStatus: null,
+      }),
       // KHÔNG persist refreshToken ở đây — nó nằm trong SecureStore, không để plaintext trong AsyncStorage.
       partialize: (state) => ({
         token: state.token,
+        expiresAt: state.expiresAt,
         userId: state.userId,
         roles: state.roles,
         driverStatus: state.driverStatus,

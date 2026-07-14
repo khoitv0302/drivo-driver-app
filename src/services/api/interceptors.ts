@@ -1,46 +1,7 @@
 import axios, { type AxiosInstance, type InternalAxiosRequestConfig } from 'axios';
-import { API_URL, API_TIMEOUT } from '@constants/config';
-import { useAuthStore, type AuthSession } from '@store/auth.store';
+import { useAuthStore } from '@store/auth.store';
 import { ApiError, type ApiErrorResponse } from './types';
-
-// POST /auth/refresh trả về cùng shape với login → dùng lại AuthSession.
-
-// axios "trần" (không interceptor) để gọi refresh — tránh đệ quy 401 vô hạn.
-const refreshClient = axios.create({ baseURL: API_URL, timeout: API_TIMEOUT });
-
-// Single-flight: nhiều request cùng dính 401 sẽ chia sẻ 1 lần gọi refresh.
-let refreshPromise: Promise<string> | null = null;
-
-async function runRefresh(): Promise<string> {
-  const refreshToken = useAuthStore.getState().refreshToken;
-  if (!refreshToken) throw new Error('NO_REFRESH_TOKEN');
-
-  if (__DEV__) console.log('[API] ↻ POST /auth/refresh (làm mới access token)');
-  try {
-    const { data } = await refreshClient.post<AuthSession>('/auth/refresh', { refreshToken });
-    // setSession cập nhật cả access token (RAM/AsyncStorage) và refresh token mới (SecureStore).
-    // Backend xoay refresh token mỗi lần refresh → phải lưu lại token mới.
-    useAuthStore.getState().setSession(data);
-    console.log('[API] ✓ refresh thành công — đã có access token mới');
-    return data.accessToken;
-  } catch (err) {
-    // refreshClient không có interceptor → tự log kết quả ở đây kẻo "mù" không biết vì sao logout.
-    const status = axios.isAxiosError(err) && err.response ? `HTTP ${err.response.status}` : 'LỖI MẠNG';
-    // console.log để LogBox không bung toast đỏ trên UI dev.
-    console.log(`[API] ✗ refresh thất bại (${status}) — refresh token không còn hiệu lực?`);
-    throw err;
-  }
-}
-
-// Export cho services/signalr: negotiate của SignalR không đi qua axios nên phải tự refresh khi 401.
-export function refreshAccessToken(): Promise<string> {
-  if (!refreshPromise) {
-    refreshPromise = runRefresh().finally(() => {
-      refreshPromise = null;
-    });
-  }
-  return refreshPromise;
-}
+import { ensureFreshAccessToken, forceRefreshAccessToken } from '@services/auth/tokenRefresh';
 
 // ── Log request/response (chỉ ở dev) ────────────────────────────────────────
 // Cố ý KHÔNG log body hay header Authorization — chúng chứa mật khẩu/OTP/token.
@@ -65,11 +26,13 @@ function elapsedMs(config?: TimedConfig): string {
   return started ? ` (${Date.now() - started}ms)` : '';
 }
 
-// Gắn interceptor cho request/response: đính token, tự refresh khi 401, chuẩn hoá lỗi tập trung.
+// Gắn interceptor cho request/response: đính token còn hạn (chủ động refresh trước nếu cần),
+// refresh-retry dự phòng khi vẫn dính 401 (lệch giờ máy chủ...), chuẩn hoá lỗi tập trung.
 export function attachInterceptors(client: AxiosInstance) {
-  // Request: tự đính Bearer token nếu đã đăng nhập.
-  client.interceptors.request.use((config) => {
-    const token = useAuthStore.getState().token;
+  // Request: đọc token + expiresAt, sắp hết hạn (<1 phút) thì chủ động refresh trước rồi mới
+  // đính Bearer token — cùng cơ chế ensureFreshAccessToken() mà SignalR accessTokenFactory dùng.
+  client.interceptors.request.use(async (config) => {
+    const token = await ensureFreshAccessToken();
     if (token) {
       config.headers.set('Authorization', `Bearer ${token}`);
     }
@@ -111,7 +74,7 @@ export function attachInterceptors(client: AxiosInstance) {
         if (canRefresh && original) {
           original._retry = true;
           try {
-            await refreshAccessToken();
+            await forceRefreshAccessToken();
             // Request interceptor sẽ tự đính access token mới khi phát lại.
             return client(original);
           } catch {
