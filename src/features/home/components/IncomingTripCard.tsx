@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import Mapbox from '@rnmapbox/maps';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -16,6 +16,7 @@ type Props = {
   trip: IncomingTrip;
   secondsLeft: number;
   totalSeconds: number;
+  accepting?: boolean;
   onAccept: () => void;
   onDecline: () => void;
 };
@@ -24,7 +25,14 @@ function fmtVND(n: number) {
   return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, '.');
 }
 
-export default function IncomingTripCard({ trip, secondsLeft, totalSeconds, onAccept, onDecline }: Props) {
+export default function IncomingTripCard({
+  trip,
+  secondsLeft,
+  totalSeconds,
+  accepting = false,
+  onAccept,
+  onDecline,
+}: Props) {
   const insets = useSafeAreaInsets();
   const [routeGeometry, setRouteGeometry] = useState<GeoJSON.Geometry | null>(null);
 
@@ -158,15 +166,31 @@ export default function IncomingTripCard({ trip, secondsLeft, totalSeconds, onAc
           </View>
 
           {/* Từ chối */}
-          <TouchableOpacity style={styles.declineBtn} activeOpacity={0.8} onPress={onDecline}>
+          <TouchableOpacity
+            style={[styles.declineBtn, accepting && { opacity: 0.5 }]}
+            activeOpacity={0.8}
+            onPress={onDecline}
+            disabled={accepting}
+          >
             <Ionicons name="close" size={17} color="#4b5563" />
             <Text style={styles.declineText}>Từ chối</Text>
           </TouchableOpacity>
 
           {/* Nhận chuyến */}
-          <TouchableOpacity style={styles.acceptBtn} activeOpacity={0.9} onPress={onAccept}>
-            <Ionicons name="checkmark-circle" size={20} color="white" />
-            <Text style={styles.acceptText}>Nhận chuyến</Text>
+          <TouchableOpacity
+            style={[styles.acceptBtn, accepting && { opacity: 0.7 }]}
+            activeOpacity={0.9}
+            onPress={onAccept}
+            disabled={accepting}
+          >
+            {accepting ? (
+              <ActivityIndicator size="small" color="white" />
+            ) : (
+              <>
+                <Ionicons name="checkmark-circle" size={20} color="white" />
+                <Text style={styles.acceptText}>Nhận chuyến</Text>
+              </>
+            )}
           </TouchableOpacity>
         </View>
       </View>

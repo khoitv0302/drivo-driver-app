@@ -1,79 +1,114 @@
-import { haversineKm } from '@shared/utils/geo';
 import type { IncomingTrip } from './components/IncomingTripCard';
 
-// Payload event "offer" từ /hubs/driver — cùng shape với booking trả về từ POST /api/bookings.
-export interface TripOffer {
-  /** Id của offer trong hệ dispatch — dùng cho POST /dispatch/offers/{offerId}/accept.
-   *  Optional vì chưa chốt contract; thiếu thì fallback bookingId. */
-  offerId?: string;
-  bookingId: string;
-  customerId: string;
-  type: string;
-  status: string;
-  vehicleType: string;
-  requiredSkills: string[];
+// Payload event "offer" từ /hubs/driver.
+export interface TripOfferBooking {
+  pickupAddress: string;
+  dropoffAddress: string;
   pickupLat: number;
   pickupLng: number;
   dropoffLat: number;
   dropoffLng: number;
-  estFareMin: number;
-  estFareMax: number;
+  pickupDistanceMeters: number;
+  tripDistanceMeters: number;
+  vehicleType: string;
+  bookingType: string;
+  fareAmount: number;
+  paymentMethod: string;
+}
+
+export interface TripOfferCustomer {
+  fullName: string;
+  avatarUrl: string | null;
+  rating: number | null;
+}
+
+export interface TripOffer {
+  offerId: string;
+  bookingId: string;
+  etaSeconds: number;
+  expiresInSeconds: number;
+  booking: TripOfferBooking;
+  customer: TripOfferCustomer;
 }
 
 // Chuyến mời đang chờ tài xế phản hồi trên HomeScreen.
-// offerId = null khi là chuyến giả lập (nút "Giả lập chuyến") → không gọi API accept.
 export interface ActiveOffer {
-  offerId: string | null;
-  bookingId: string | null;
+  offerId: string;
+  bookingId: string;
   trip: IncomingTrip;
+  // phone chỉ có sau khi trip được xác nhận qua GET /trips/me/current (offer chưa có).
+  customer: { name: string; rating: number; phone?: string };
 }
 
-// Narrow unknown → TripOffer. Chỉ bắt buộc các field cần để render card;
-// field thiếu kiểu số khác (giá...) được xử lý mềm ở offerToIncomingTrip.
+// Narrow unknown → TripOffer. Chỉ bắt buộc các field cần để render card.
 export function parseTripOffer(payload: unknown): TripOffer | null {
   if (typeof payload !== 'object' || payload === null) return null;
   const p = payload as Record<string, unknown>;
-  if (typeof p.bookingId !== 'string') return null;
+  if (typeof p.offerId !== 'string' || typeof p.bookingId !== 'string') return null;
+  if (typeof p.booking !== 'object' || p.booking === null) return null;
+  const b = p.booking as Record<string, unknown>;
   const requiredNumbers = ['pickupLat', 'pickupLng', 'dropoffLat', 'dropoffLng'];
-  if (!requiredNumbers.every((k) => typeof p[k] === 'number')) return null;
+  if (!requiredNumbers.every((k) => typeof b[k] === 'number')) return null;
+  if (typeof p.customer !== 'object' || p.customer === null) return null;
+  if (typeof (p.customer as Record<string, unknown>).fullName !== 'string') return null;
   return p as unknown as TripOffer;
 }
 
-// Mò tripId từ response accept offer (shape chưa chốt) — chấp nhận các tên field phổ biến.
-export function extractTripId(res: unknown): string | undefined {
-  if (typeof res !== 'object' || res === null) return undefined;
-  const r = res as Record<string, unknown>;
-  if (typeof r.tripId === 'string') return r.tripId;
-  if (typeof r.id === 'string') return r.id;
-  if (typeof r.trip === 'object' && r.trip !== null) {
-    const t = r.trip as Record<string, unknown>;
-    if (typeof t.tripId === 'string') return t.tripId;
-    if (typeof t.id === 'string') return t.id;
-  }
-  return undefined;
+// Khách/tài xế đối diện trong chuyến — trả về từ GET /trips/me/current.
+export interface CurrentTripCounterparty {
+  fullName: string;
+  avatarUrl: string | null;
+  rating: number | null;
+  phone: string;
 }
 
-// Map offer từ backend → dữ liệu card IncomingTripCard.
-// driverCoord: vị trí hiện tại của tài xế [lng, lat] — tính khoảng cách tới điểm đón.
-export function offerToIncomingTrip(offer: TripOffer, driverCoord: [number, number]): IncomingTrip {
-  const pickupCoord: [number, number] = [offer.pickupLng, offer.pickupLat];
-  const dropoffCoord: [number, number] = [offer.dropoffLng, offer.dropoffLat];
+// Chuyến hiện tại của tài xế — response của GET /trips/me/current?as=driver.
+// Poll bằng useWaitForTrip ngay sau khi accept offer tới khi backend lưu xong.
+export interface CurrentTrip {
+  tripId: string;
+  bookingId: string;
+  status: string;
+  pickupAddress: string;
+  dropoffAddress: string;
+  pickupLat: number;
+  pickupLng: number;
+  dropoffLat: number;
+  dropoffLng: number;
+  /** null tới khi chuyến hoàn tất/chốt cước — vd còn "en_route" thì chưa có giá */
+  fareAmount: number | null;
+  /** null tới khi khách chọn thanh toán */
+  paymentMethod: string | null;
+  counterparty: CurrentTripCounterparty;
+}
 
-  // Backend chưa gửi địa chỉ chữ → tạm dùng nhãn cố định; TODO: reverse-geocode hoặc chờ API bổ sung.
+export interface CurrentTripResponse {
+  trip: CurrentTrip;
+}
+
+// Nhãn phương thức thanh toán hiển thị trên card — cùng quy ước với features/trips/components/TripCard.
+const PAYMENT_LABELS: Record<string, string> = {
+  cash: 'Tiền mặt',
+  wallet: 'Ví Drivo',
+  card: 'Thẻ',
+};
+
+// Map offer từ backend → dữ liệu card IncomingTripCard.
+// Khoảng cách lấy thẳng từ backend (pickupDistanceMeters/tripDistanceMeters) — dispatch
+// đã tính theo vị trí tài xế được offer, không cần haversine lại ở client.
+export function offerToIncomingTrip(offer: TripOffer): IncomingTrip {
+  const { booking } = offer;
   return {
     pickup: {
-      name: 'Điểm đón khách',
-      distanceKm: haversineKm(driverCoord, pickupCoord),
-      coord: pickupCoord,
+      name: booking.pickupAddress,
+      distanceKm: booking.pickupDistanceMeters / 1000,
+      coord: [booking.pickupLng, booking.pickupLat],
     },
     dropoff: {
-      name: 'Điểm trả khách',
-      distanceKm: haversineKm(pickupCoord, dropoffCoord),
-      coord: dropoffCoord,
+      name: booking.dropoffAddress,
+      distanceKm: booking.tripDistanceMeters / 1000,
+      coord: [booking.dropoffLng, booking.dropoffLat],
     },
-    // Card chỉ hiển thị 1 con số → lấy trung điểm khoảng giá ước tính.
-    income: Math.round(((offer.estFareMin ?? 0) + (offer.estFareMax ?? offer.estFareMin ?? 0)) / 2),
-    // Backend chưa gửi hình thức thanh toán → mặc định tiền mặt.
-    payment: 'Tiền mặt',
+    income: booking.fareAmount,
+    payment: PAYMENT_LABELS[booking.paymentMethod] ?? booking.paymentMethod,
   };
 }

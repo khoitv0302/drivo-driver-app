@@ -54,6 +54,54 @@ const quietLogger: ILogger = {
   },
 };
 
+// Giây còn lại trước khi access token hết hạn. Trả null nếu không decode được `exp`
+// (token không phải JWT / môi trường thiếu atob) → coi như "không rõ", cứ dùng token đang có.
+function tokenTtlSeconds(token: string): number | null {
+  try {
+    const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+    const { exp } = JSON.parse(atob(padded)) as { exp?: number };
+    if (typeof exp !== 'number') return null;
+    return exp - Math.floor(Date.now() / 1000);
+  } catch {
+    return null;
+  }
+}
+
+// Đệm hết hạn: refresh sớm khi token còn dưới ngần này (tránh negotiate trúng đúng lúc token vừa hết).
+const TOKEN_REFRESH_SKEW_SECONDS = 30;
+
+// accessTokenFactory được SignalR gọi ở MỌI lần negotiate — cả lần start đầu lẫn từng lần
+// auto-reconnect. Đây là chỗ duy nhất đảm bảo token luôn tươi: negotiate không đi qua interceptor
+// axios nên access token hết hạn giữa phiên (chỉ ~5–15p) sẽ không được refresh ở đâu khác, khiến
+// reconnect lặp vô hạn với token chết → mất UpdateLocation → FE mất position/eta. Refresh tại đây
+// tự "self-heal" mỗi lần nối lại.
+async function driverHubAccessToken(): Promise<string> {
+  const token = useAuthStore.getState().token ?? '';
+  const ttl = token ? tokenTtlSeconds(token) : null;
+
+  // Còn hạn (hoặc không rõ hạn) → dùng luôn.
+  if (token && (ttl === null || ttl > TOKEN_REFRESH_SKEW_SECONDS)) return token;
+
+  if (!useAuthStore.getState().refreshToken) {
+    console.log('[HUB] ⚠ access token hết hạn nhưng KHÔNG có refresh token → negotiate sẽ 401 → đăng xuất');
+    return token;
+  }
+
+  console.log(
+    `[HUB] ⏰ access token ${ttl === null ? 'trống' : `hết hạn (còn ${ttl}s)`} — tự refresh trước khi negotiate...`,
+  );
+  try {
+    const fresh = await refreshAccessToken();
+    console.log('[HUB] ✓ đã refresh access token cho hub — negotiate với token mới');
+    return fresh;
+  } catch {
+    // Refresh hỏng (revoke-all / lỗi mạng): trả token cũ để negotiate 401 → onclose → luồng đăng xuất.
+    console.log('[HUB] ✗ refresh token cho hub thất bại — để negotiate 401 xử lý tiếp');
+    return token;
+  }
+}
+
 // ── Khởi tạo connection ──────────────────────────────────────────────────────
 function getConnection(): HubConnection {
   if (connection) return connection;
@@ -62,9 +110,15 @@ function getConnection(): HubConnection {
     .withUrl(DRIVER_HUB_URL, {
       // React Native không có EventSource/document → chỉ dùng WebSockets.
       transport: HttpTransportType.WebSockets,
-      // Token đọc mỗi lần negotiate/reconnect → luôn lấy access token mới nhất
-      // (kể cả sau khi interceptor axios đã refresh).
-      accessTokenFactory: () => useAuthStore.getState().token ?? '',
+      // Bỏ bước negotiate (HTTP POST /hubs/driver/negotiate) — mở thẳng WebSocket.
+      // Trên RN, POST negotiate hay fail "Network request failed" (chập chờn qua proxy sslip.io)
+      // dù chính WebSocket lại kết nối được → cả kết nối chết oan. Bỏ negotiate = né hẳn bước đó.
+      // Chỉ hợp lệ với backend .NET tự host (không phải Azure SignalR Service) — đúng như setup hiện tại;
+      // token khi đó đi thẳng vào query ?access_token= của WebSocket qua accessTokenFactory bên dưới.
+      skipNegotiation: true,
+      // Token đọc + tự refresh mỗi lần (re)connect → luôn có access token còn hạn, kể cả trong
+      // vòng auto-reconnect của SignalR (chỗ startWithAuthRetry không với tới được).
+      accessTokenFactory: driverHubAccessToken,
     })
     .withAutomaticReconnect({
       // Retry vô hạn với backoff lũy tiến, trần 30s — tài xế cần realtime liên tục.

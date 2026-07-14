@@ -20,7 +20,8 @@
               "NSExceptionAllowsInsecureHTTPLoads": true
             }
           }
-        }
+        },
+        "LSApplicationQueriesSchemes": ["comgooglemaps"]
       }
     },
     "android": {

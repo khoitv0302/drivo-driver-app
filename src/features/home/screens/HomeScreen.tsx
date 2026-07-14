@@ -1,5 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, PermissionsAndroid, Platform, StyleSheet, Text, TouchableOpacity, Vibration, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Alert,
+  PermissionsAndroid,
+  Platform,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  Vibration,
+  View,
+} from 'react-native';
 import Mapbox, { locationManager } from '@rnmapbox/maps';
 import type { Location } from '@rnmapbox/maps';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -9,9 +19,10 @@ import type { MainTabScreenProps } from '../../../navigation/types';
 import IncomingTripCard, { type IncomingTrip } from '../components/IncomingTripCard';
 import { useStatusBarStyle } from '../../../shared/hooks/useStatusBarStyle';
 import { useDriverHub, useDriverHubOffer } from '../hooks/useDriverHub';
-import { parseTripOffer, offerToIncomingTrip, extractTripId, type ActiveOffer } from '../types';
+import { parseTripOffer, offerToIncomingTrip, type ActiveOffer } from '../types';
 import { useAcceptOffer } from '../api/useAcceptOffer';
 import { useDeclineOffer } from '../api/useDeclineOffer';
+import { useWaitForTrip, TRIP_POLL_MAX_ATTEMPTS } from '../api/useWaitForTrip';
 
 // Toạ độ fallback (TP.HCM) khi chưa lấy được GPS — dạng [lng, lat] theo chuẩn Mapbox
 const HCM_FALLBACK: [number, number] = [106.660172, 10.762622];
@@ -21,17 +32,6 @@ const TODAY_EARNINGS = 1202000;
 
 // Thời gian đếm ngược cho một yêu cầu chuyến (giây)
 const REQUEST_SECONDS = 15;
-
-// Chuyến giả lập — thay bằng dữ liệu realtime khi tích hợp API
-const MOCK_TRIP: IncomingTrip = {
-  pickup: { name: 'Nguyễn Huệ, Quận 1', distanceKm: 0.8, coord: [106.7038, 10.7743] },
-  dropoff: { name: 'Sân bay Tân Sơn Nhất', distanceKm: 7.2, coord: [106.6666, 10.8188] },
-  income: 120000,
-  payment: 'Tiền mặt',
-};
-
-// Thông tin khách giả lập cho màn chuyến đang chạy
-const MOCK_PASSENGER = { name: 'Trần Thị B', rating: 4.9, note: 'Mang theo vali màu đen' };
 
 // Nhịp rung lặp khi có chuyến: chờ - rung - nghỉ - rung ...
 const VIBRATION_PATTERN = [0, 600, 400, 600, 800];
@@ -62,22 +62,49 @@ export default function HomeScreen({ navigation }: MainTabScreenProps<'Home'>) {
       console.log('[HUB] ⚠ payload offer sai shape — bỏ qua (xem log ⇩ offer ở trên)');
       return;
     }
-    // Endpoint accept/decline cần offerId; payload chưa chốt field này → fallback bookingId.
-    const offerId = parsed.offerId ?? parsed.bookingId;
-    if (!parsed.offerId) console.log(`[HUB] payload không có offerId — dùng bookingId=${offerId}`);
     setOffer({
-      offerId,
+      offerId: parsed.offerId,
       bookingId: parsed.bookingId,
-      trip: offerToIncomingTrip(parsed, userCoords),
+      trip: offerToIncomingTrip(parsed),
+      customer: { name: parsed.customer.fullName, rating: parsed.customer.rating ?? 0 },
     });
   });
 
-  // Chuyến mời đang chờ phản hồi (từ hub hoặc giả lập) + đếm ngược
+  // Chuyến mời đang chờ phản hồi (từ hub) + đếm ngược
   const [offer, setOffer] = useState<ActiveOffer | null>(null);
   const [secondsLeft, setSecondsLeft] = useState(REQUEST_SECONDS);
 
   const { mutate: acceptOffer, isPending: accepting } = useAcceptOffer();
   const { mutate: declineOffer } = useDeclineOffer();
+
+  // Sau khi accept, chờ backend lưu xong chuyến trước khi vào màn chuyến đang chạy.
+  // pendingTrip = null khi không có gì đang chờ xác nhận.
+  const [pendingTrip, setPendingTrip] = useState<{
+    bookingId: string;
+    trip: IncomingTrip;
+  } | null>(null);
+  const tripReady = useWaitForTrip(pendingTrip?.bookingId ?? null);
+
+  useEffect(() => {
+    if (!pendingTrip) return;
+    if (tripReady.isSuccess) {
+      const { trip } = pendingTrip;
+      // tripId + thông tin khách thật lấy từ response /trips/me/current — chính xác hơn
+      // dữ liệu suy ra từ offer (offer không có phone).
+      const { tripId, status, counterparty } = tripReady.data.trip;
+      const customer = {
+        name: counterparty.fullName,
+        rating: counterparty.rating ?? 0,
+        phone: counterparty.phone,
+      };
+      setPendingTrip(null);
+      goToActiveTrip(trip, customer, tripId, status);
+    } else if (tripReady.isError) {
+      setPendingTrip(null);
+      Alert.alert('Chưa xác nhận được chuyến', 'Hệ thống chưa lưu xong chuyến, vui lòng thử lại sau.');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingTrip, tripReady.isSuccess, tripReady.isError]);
 
   const stopAlert = () => {
     Vibration.cancel();
@@ -109,44 +136,35 @@ export default function HomeScreen({ navigation }: MainTabScreenProps<'Home'>) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [offer]);
 
-  const simulateTrip = () => {
-    if (offer) return;
-    // offerId = null → chuyến giả lập, accept/decline không gọi API
-    setOffer({ offerId: null, bookingId: null, trip: MOCK_TRIP });
-  };
-
   // Điều hướng sang luồng chuyến đang chạy với dữ liệu chuyến vừa nhận
-  const goToActiveTrip = (trip: IncomingTrip, tripId?: string) => {
+  const goToActiveTrip = (
+    trip: IncomingTrip,
+    customer: ActiveOffer['customer'],
+    tripId: string,
+    status?: string
+  ) => {
     navigation.navigate(ROUTES.ACTIVE_TRIP, {
       tripId,
       pickup: trip.pickup,
       dropoff: trip.dropoff,
-      passenger: MOCK_PASSENGER, // TODO: thay bằng dữ liệu khách thật khi backend gửi kèm offer
+      passenger: customer,
       fare: trip.income,
       payment: trip.payment,
+      status,
     });
   };
 
   const acceptTrip = () => {
     if (!offer || accepting) return;
     stopAlert();
-    const { offerId, trip } = offer;
-
-    // Chuyến giả lập — không có offer thật để accept, đi thẳng vào luồng chuyến
-    if (!offerId) {
-      setOffer(null);
-      goToActiveTrip(trip);
-      return;
-    }
+    const { offerId, bookingId, trip } = offer;
 
     acceptOffer(offerId, {
-      onSuccess: (res) => {
-        // Log để chốt shape response với backend; tripId cần cho các API /trips/{id}/... về sau.
-        console.log('[API] accept offer response:', JSON.stringify(res));
-        const tripId = extractTripId(res);
-        if (!tripId) console.log('[API] ⚠ response accept không có tripId — nút "Khách đã lên xe" sẽ không gọi được API');
+      onSuccess: () => {
         setOffer(null);
-        goToActiveTrip(trip, tripId);
+        // API accept trả 200 rỗng — không biết backend lưu chuyến xong lúc nào, nên
+        // chờ xác nhận qua GET /trips/me/current (useWaitForTrip) trước khi vào màn chuyến đang chạy.
+        setPendingTrip({ bookingId, trip });
       },
       onError: (err) => {
         // Chuyến có thể đã được tài xế khác nhận / offer hết hạn phía server
@@ -162,12 +180,10 @@ export default function HomeScreen({ navigation }: MainTabScreenProps<'Home'>) {
     stopAlert();
     const { offerId } = offer;
     setOffer(null); // đóng card ngay, không bắt tài xế chờ API
-    if (offerId) {
-      // Fire-and-forget: từ chối thất bại thì offer cũng tự hết hạn phía server
-      declineOffer(offerId, {
-        onError: (err) => console.log(`[API] ✗ decline offer ${offerId} thất bại: ${err.message}`),
-      });
-    }
+    // Fire-and-forget: từ chối thất bại thì offer cũng tự hết hạn phía server
+    declineOffer(offerId, {
+      onError: (err) => console.log(`[API] ✗ decline offer ${offerId} thất bại: ${err.message}`),
+    });
   };
 
   // Lấy vị trí tài xế qua locationManager — giống cách customer app làm ở MapScreen
@@ -269,12 +285,6 @@ export default function HomeScreen({ navigation }: MainTabScreenProps<'Home'>) {
         <Ionicons name="locate" size={20} color="#2563EB" />
       </TouchableOpacity>
 
-      {/* Nút giả lập có chuyến (tạm — bỏ khi tích hợp API realtime) */}
-      <TouchableOpacity style={styles.simulateBtn} activeOpacity={0.85} onPress={simulateTrip}>
-        <Ionicons name="flash" size={16} color="white" />
-        <Text style={styles.simulateText}>Giả lập chuyến</Text>
-      </TouchableOpacity>
-
       {/* ── Thẻ trạng thái dưới cùng ── */}
       <View style={styles.bottomSheet}>
         {/* Drag handle */}
@@ -323,15 +333,26 @@ export default function HomeScreen({ navigation }: MainTabScreenProps<'Home'>) {
         </TouchableOpacity>
       </View>
 
-      {/* ── Yêu cầu chuyến đến (từ hub hoặc giả lập) ── */}
+      {/* ── Yêu cầu chuyến đến (từ hub) ── */}
       {offer && (
         <IncomingTripCard
           trip={offer.trip}
           secondsLeft={secondsLeft}
           totalSeconds={REQUEST_SECONDS}
+          accepting={accepting}
           onAccept={acceptTrip}
           onDecline={declineTrip}
         />
+      )}
+
+      {/* ── Đang chờ backend lưu xong chuyến sau khi accept ── */}
+      {pendingTrip && (
+        <View style={styles.confirmOverlay}>
+          <View style={styles.confirmCard}>
+            <ActivityIndicator size="large" color="#2563EB" />
+            <Text style={styles.confirmText}>Đang xác nhận chuyến...</Text>
+          </View>
+        </View>
       )}
     </View>
   );
@@ -411,24 +432,6 @@ const styles = StyleSheet.create({
     shadowRadius: 5,
     elevation: 5,
   },
-  simulateBtn: {
-    position: 'absolute',
-    left: 16,
-    bottom: 168,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    height: 44,
-    paddingHorizontal: 14,
-    borderRadius: 22,
-    backgroundColor: '#7c3aed',
-    shadowColor: '#7c3aed',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 6,
-    elevation: 5,
-  },
-  simulateText: { color: 'white', fontSize: 13, fontWeight: '700' },
   bottomSheet: {
     position: 'absolute',
     left: 0,
@@ -492,4 +495,20 @@ const styles = StyleSheet.create({
     elevation: 6,
   },
   onlineText: { color: 'white', fontSize: 16, fontWeight: '700' },
+  confirmOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(17,24,39,0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  confirmCard: {
+    backgroundColor: 'white',
+    borderRadius: 20,
+    paddingVertical: 28,
+    paddingHorizontal: 32,
+    alignItems: 'center',
+    gap: 10,
+  },
+  confirmText: { fontSize: 15, fontWeight: '700', color: '#111827' },
+  confirmSubText: { fontSize: 12, color: '#6b7280' },
 });

@@ -20,11 +20,15 @@ export type ActiveTripParams = {
   tripId?: string;
   pickup: TripPlace;
   dropoff: TripPlace;
-  passenger: { name: string; rating: number; note?: string };
+  passenger: { name: string; rating: number; note?: string; phone?: string };
   /** Giá cước hiển thị cho khách */
   fare: number;
   /** Nhãn phương thức thanh toán, vd "Tiền mặt" */
   payment: string;
+  /** Trạng thái chuyến thật từ GET /trips/me/current (vd "en_route", "in_progress"...) —
+   *  dùng để khởi tạo đúng pha màn hình, tránh mặc định sai "enroute_pickup" khi resume
+   *  1 chuyến đã đang ở pha khác. Không có (chuyến giả lập) thì mặc định enroute_pickup. */
+  status?: string;
 };
 
 // Root stack — luồng auth + app chính

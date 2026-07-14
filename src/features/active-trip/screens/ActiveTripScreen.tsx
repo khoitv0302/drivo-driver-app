@@ -1,4 +1,5 @@
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useState } from 'react';
+import { ActivityIndicator, Linking, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { ROUTES } from '../../../constants/routes';
@@ -7,6 +8,7 @@ import { useStatusBarStyle } from '../../../shared/hooks/useStatusBarStyle';
 import { getAvatarColor, getInitials } from '../../../shared/utils/avatar';
 import TripMap from '../components/TripMap';
 import SlideToComplete from '../components/SlideToComplete';
+import NavigationAppSheet from '../components/NavigationAppSheet';
 import { useActiveTrip } from '../hooks/useActiveTrip';
 
 // Phụ phí / khuyến mãi giả lập để dựng bảng kê cước (thay bằng API sau)
@@ -35,16 +37,58 @@ const TITLES: Record<string, string> = {
 export default function ActiveTripScreen({ route, navigation }: RootScreenProps<'ActiveTrip'>) {
   const trip = route.params;
   const insets = useSafeAreaInsets();
-  const { phase, rating, setRating, leg, setLeg, wait, advance, primaryAction, confirming, mapLeg } =
-    useActiveTrip(trip);
+  const {
+    phase,
+    rating,
+    setRating,
+    leg,
+    wait,
+    advance,
+    primaryAction,
+    confirming,
+    mapLeg,
+    driverCoord,
+    fareResult,
+  } = useActiveTrip(trip);
 
   const isMapPhase = phase !== 'summary' && phase !== 'completed';
   // Nền bản đồ sáng và nền tổng kết xám nhạt đều cần chữ status bar màu đen
   useStatusBarStyle('dark');
 
-  const driverReceive = trip.fare + SURCHARGE + PROMO;
+  const [navSheetVisible, setNavSheetVisible] = useState(false);
+
+  // Sau khi có cước thực từ POST /trips/{id}/arrived-destination thì dùng số đó thay cho giá quote ban đầu.
+  const totalFare = fareResult?.fareAmount ?? trip.fare;
+  const driverReceive = fareResult?.netFareAmount ?? trip.fare + SURCHARGE + PROMO;
 
   const goHome = () => navigation.navigate(ROUTES.MAIN);
+
+  // Gọi khách qua trình quay số — chỉ chuyến thật mới có số (chuyến giả lập không có phone).
+  const callPassenger = () => {
+    if (!trip.passenger.phone) return;
+    Linking.openURL(`tel:${trip.passenger.phone}`);
+  };
+
+  // Chỉ đường tới điểm đến của chặng hiện tại (điểm đón/điểm trả) — tài xế chọn app qua
+  // NavigationAppSheet. Mỗi hàm ưu tiên mở thẳng app đã cài, fallback sang link web/Apple Maps
+  // nếu máy không cài Google Maps.
+  const openGoogleMaps = () => {
+    const [lng, lat] = mapLeg.to;
+    const appUrl =
+      Platform.OS === 'ios'
+        ? `comgooglemaps://?daddr=${lat},${lng}&directionsmode=driving`
+        : `google.navigation:q=${lat},${lng}`;
+    const webUrl = `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&travelmode=driving`;
+
+    Linking.canOpenURL(appUrl)
+      .then((supported) => Linking.openURL(supported ? appUrl : webUrl))
+      .catch(() => Linking.openURL(webUrl));
+  };
+
+  const openAppleMaps = () => {
+    const [lng, lat] = mapLeg.to;
+    Linking.openURL(`maps://?daddr=${lat},${lng}&dirflg=d`);
+  };
 
   return (
     <View style={styles.root}>
@@ -55,8 +99,8 @@ export default function ActiveTripScreen({ route, navigation }: RootScreenProps<
           destinationKind={mapLeg.kind}
           padTop={190}
           padBottom={260}
-          animateDriver={phase === 'enroute_pickup' || phase === 'on_trip'}
-          onLeg={setLeg}
+          animateDriver={phase === 'on_trip'}
+          driverCoord={driverCoord}
         />
       )}
 
@@ -89,7 +133,7 @@ export default function ActiveTripScreen({ route, navigation }: RootScreenProps<
           <TouchableOpacity style={styles.floatBtn} activeOpacity={0.85}>
             <Ionicons name="chatbubble-ellipses-outline" size={20} color="#2563EB" />
           </TouchableOpacity>
-          <TouchableOpacity style={styles.floatBtn} activeOpacity={0.85}>
+          <TouchableOpacity style={styles.floatBtn} activeOpacity={0.85} onPress={() => setNavSheetVisible(true)}>
             <Ionicons name="navigate" size={20} color="#2563EB" />
           </TouchableOpacity>
         </View>
@@ -105,6 +149,19 @@ export default function ActiveTripScreen({ route, navigation }: RootScreenProps<
 
       {/* ── Pha hoàn thành ── */}
       {phase === 'completed' && renderCompleted()}
+
+      <NavigationAppSheet
+        visible={navSheetVisible}
+        onClose={() => setNavSheetVisible(false)}
+        onSelectGoogleMaps={() => {
+          setNavSheetVisible(false);
+          openGoogleMaps();
+        }}
+        onSelectAppleMaps={() => {
+          setNavSheetVisible(false);
+          openAppleMaps();
+        }}
+      />
     </View>
   );
 
@@ -185,7 +242,12 @@ export default function ActiveTripScreen({ route, navigation }: RootScreenProps<
         <TouchableOpacity style={styles.paxIcon} activeOpacity={0.8}>
           <Ionicons name="chatbubble-ellipses-outline" size={18} color="#2563EB" />
         </TouchableOpacity>
-        <TouchableOpacity style={styles.paxIcon} activeOpacity={0.8}>
+        <TouchableOpacity
+          style={[styles.paxIcon, !trip.passenger.phone && { opacity: 0.4 }]}
+          activeOpacity={0.8}
+          onPress={callPassenger}
+          disabled={!trip.passenger.phone}
+        >
           <Ionicons name="call-outline" size={18} color="#2563EB" />
         </TouchableOpacity>
       </View>
@@ -218,20 +280,6 @@ export default function ActiveTripScreen({ route, navigation }: RootScreenProps<
           </View>
         )}
 
-        {/* Nút phụ khi đang chở khách */}
-        {phase === 'on_trip' && (
-          <View style={styles.secondaryRow}>
-            <TouchableOpacity style={styles.secondaryBtn} activeOpacity={0.85}>
-              <Ionicons name="share-social-outline" size={16} color="#2563EB" />
-              <Text style={styles.secondaryText}>Chia sẻ hành trình</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.secondaryBtn} activeOpacity={0.85}>
-              <Ionicons name="call-outline" size={16} color="#2563EB" />
-              <Text style={styles.secondaryText}>Gọi cho khách</Text>
-            </TouchableOpacity>
-          </View>
-        )}
-
         {/* Nút hành động chính — gọi API tương ứng pha (nếu có) rồi mới chuyển pha */}
         <TouchableOpacity
           style={[styles.primaryBtn, confirming && { opacity: 0.6 }]}
@@ -239,8 +287,14 @@ export default function ActiveTripScreen({ route, navigation }: RootScreenProps<
           onPress={primaryAction}
           disabled={confirming}
         >
-          <Ionicons name={primaryIcon()} size={18} color="white" />
-          <Text style={styles.primaryText}>{confirming ? 'Đang xác nhận...' : primaryLabel()}</Text>
+          {confirming ? (
+            <ActivityIndicator size="small" color="white" />
+          ) : (
+            <>
+              <Ionicons name={primaryIcon()} size={18} color="white" />
+              <Text style={styles.primaryText}>{primaryLabel()}</Text>
+            </>
+          )}
         </TouchableOpacity>
       </>
     );
@@ -288,7 +342,7 @@ export default function ActiveTripScreen({ route, navigation }: RootScreenProps<
               <Ionicons name="chevron-down" size={13} color="#6b7280" />
             </View>
           </View>
-          <Text style={styles.totalValue}>{fmtVND(trip.fare)}đ</Text>
+          <Text style={styles.totalValue}>{fmtVND(totalFare)}đ</Text>
           <Text style={styles.thankText}>Cảm ơn bạn đã phục vụ khách hàng!</Text>
         </View>
 
@@ -345,11 +399,22 @@ export default function ActiveTripScreen({ route, navigation }: RootScreenProps<
         <View style={styles.card}>
           <Text style={styles.detailHeading}>Chi tiết thanh toán</Text>
 
-          {renderFareRow('wallet', '#dcfce7', '#16a34a', 'Tổng cước phí', fmtVND(trip.fare) + 'đ')}
+          {renderFareRow('wallet', '#dcfce7', '#16a34a', 'Tổng cước phí', fmtVND(totalFare) + 'đ')}
+          {!fareResult && (
+            <>
+              <View style={styles.rowDivider} />
+              {renderFareRow('pricetag', '#e0e7ff', '#4f46e5', 'Phụ phí', fmtVND(SURCHARGE) + 'đ')}
+            </>
+          )}
           <View style={styles.rowDivider} />
-          {renderFareRow('pricetag', '#e0e7ff', '#4f46e5', 'Phụ phí', fmtVND(SURCHARGE) + 'đ')}
-          <View style={styles.rowDivider} />
-          {renderFareRow('ticket', '#dcfce7', '#16a34a', 'Khuyến mãi', fmtVND(PROMO) + 'đ', '#16a34a')}
+          {renderFareRow(
+            'ticket',
+            '#dcfce7',
+            '#16a34a',
+            'Khuyến mãi',
+            fmtVND(fareResult ? -fareResult.discountAmount : PROMO) + 'đ',
+            '#16a34a'
+          )}
 
           <View style={styles.dashedDivider} />
 
@@ -544,19 +609,6 @@ const styles = StyleSheet.create({
     borderRadius: 20,
   },
   payText: { fontSize: 12, fontWeight: '600', color: '#6b7280' },
-
-  secondaryRow: { flexDirection: 'row', gap: 10, marginTop: 14 },
-  secondaryBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 12,
-    borderRadius: 14,
-    backgroundColor: '#eff6ff',
-  },
-  secondaryText: { fontSize: 12, fontWeight: '700', color: '#2563EB' },
 
   primaryBtn: {
     flexDirection: 'row',

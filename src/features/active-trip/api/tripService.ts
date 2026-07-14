@@ -1,10 +1,42 @@
 import { apiClient } from '@services/api/client';
 
-// Tài xế xác nhận khách đã lên xe tại điểm đón.
-// Response shape chưa chốt với backend → unknown; UI chỉ cần biết thành công/thất bại.
-export async function markArrived(tripId: string): Promise<unknown> {
-  const { data } = await apiClient.post<unknown>(`/trips/${tripId}/arrived`);
+// Gọi ngầm khi tài xế vào bán kính ~500m quanh điểm đón — backend dùng để xác minh vị trí
+// thực tế, chống tài xế báo đón khách khi còn ở xa. Không phải hành động của tài xế nên
+// không chặn/không báo lỗi UI: response khác 200 thì bỏ qua, luồng chuyến vẫn tiếp tục bình thường.
+export async function arrivedPickup(tripId: string): Promise<void> {
+  await apiClient.post(`/trips/${tripId}/arrived-pickup`);
+}
+
+// Tài xế xác nhận khách đã lên xe tại điểm đón — chuyển pha "đang đến điểm đón" → "đang trên chuyến đi".
+// Response 200 rỗng.
+export async function pickUpPassenger(tripId: string): Promise<void> {
+  await apiClient.post(`/trips/${tripId}/picked-up`);
+}
+
+// Cước thực tế backend chốt khi tài xế báo đã đến điểm trả khách.
+export interface ArrivedDestinationResult {
+  fareAmount: number;
+  discountAmount: number;
+  netFareAmount: number;
+  currency: string;
+}
+
+// Tài xế xác nhận đã đến điểm đến — gửi quãng đường thực đã chạy để backend chốt cước.
+export async function arrivedDestination(
+  tripId: string,
+  distanceKm: number,
+): Promise<ArrivedDestinationResult> {
+  const { data } = await apiClient.post<ArrivedDestinationResult>(
+    `/trips/${tripId}/arrived-destination`,
+    { distanceKm },
+  );
   return data;
+}
+
+// Tài xế xác nhận khách đã thanh toán — chuyển pha "đã đến điểm đến" → "tổng kết chuyến đi".
+// Response 200 rỗng.
+export async function confirmPayment(tripId: string, paymentMethod: string): Promise<void> {
+  await apiClient.post(`/trips/${tripId}/confirm-payment`, { paymentMethod });
 }
 
 // Số liệu chốt chuyến gửi lên khi hoàn thành.

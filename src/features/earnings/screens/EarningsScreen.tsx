@@ -1,13 +1,13 @@
 import { useState } from 'react';
-import { ScrollView, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, ScrollView, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import Card from '../../../shared/components/ui/Card';
 import { useStatusBarStyle } from '../../../shared/hooks/useStatusBarStyle';
+import { useEarnings } from '../api/useEarnings';
+import type { EarningsPeriod } from '../types';
 
-type PeriodKey = 'today' | 'week' | 'month';
-
-const PERIODS: { key: PeriodKey; label: string }[] = [
+const PERIODS: { key: EarningsPeriod; label: string }[] = [
   { key: 'today', label: 'Hôm nay' },
   { key: 'week', label: 'Tuần này' },
   { key: 'month', label: 'Tháng này' },
@@ -15,21 +15,18 @@ const PERIODS: { key: PeriodKey; label: string }[] = [
 
 const AVAILABLE_BALANCE = 2450000;
 
-const PERIOD_DATA: Record<PeriodKey, { earning: number; trips: number; hours: string; km: number; bonus: number }> = {
-  today: { earning: 498000, trips: 8, hours: '6.5', km: 82, bonus: 50000 },
-  week: { earning: 2450000, trips: 43, hours: '38', km: 512, bonus: 220000 },
-  month: { earning: 18200000, trips: 186, hours: '162', km: 2340, bonus: 940000 },
-};
+const WEEKDAY_LABELS = ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'];
 
-const WEEK_CHART = [
-  { day: 'T2', value: 320000 },
-  { day: 'T3', value: 410000 },
-  { day: 'T4', value: 280000 },
-  { day: 'T5', value: 520000 },
-  { day: 'T6', value: 480000 },
-  { day: 'T7', value: 620000 },
-  { day: 'CN', value: 498000 },
-];
+// "2026-07-13" → "T2" | ... | "CN" (không lệ thuộc timezone thiết bị).
+function weekdayLabel(isoDate: string): string {
+  const [y, m, d] = isoDate.split('-').map(Number);
+  return WEEKDAY_LABELS[new Date(Date.UTC(y, m - 1, d)).getUTCDay()];
+}
+
+// Giây online → chuỗi giờ gọn, vd 300 → "0.1", 23400 → "6.5".
+function fmtHours(seconds: number): string {
+  return (seconds / 3600).toFixed(1);
+}
 
 type Activity = {
   id: string;
@@ -57,13 +54,15 @@ const CHART_HEIGHT = 110;
 
 export default function EarningsScreen() {
   const insets = useSafeAreaInsets();
-  const [period, setPeriod] = useState<PeriodKey>('week');
+  const [period, setPeriod] = useState<EarningsPeriod>('week');
 
   // Header xanh trên cùng → chữ status bar màu trắng
   useStatusBarStyle('light');
 
-  const stats = PERIOD_DATA[period];
-  const maxChart = Math.max(...WEEK_CHART.map(d => d.value));
+  const { data, isLoading, isError, refetch } = useEarnings(period);
+
+  const chart = (data?.daily ?? []).map(d => ({ day: weekdayLabel(d.date), value: d.amount }));
+  const maxChart = Math.max(1, ...chart.map(d => d.value));
 
   return (
     <View className="flex-1 bg-gray-50">
@@ -116,14 +115,30 @@ export default function EarningsScreen() {
         {/* ── Earning tổng + lưới thống kê ── */}
         <Card className="mx-4 mt-4 p-5">
           <Text className="text-sm text-gray-400">Thu nhập {PERIODS.find(p => p.key === period)?.label.toLowerCase()}</Text>
-          <Text className="text-2xl font-extrabold text-gray-900 mt-1">{fmtVND(stats.earning)}đ</Text>
 
-          <View className="flex-row flex-wrap mt-4" style={{ rowGap: 16 }}>
-            <StatItem icon="car-sports" label="Chuyến" value={`${stats.trips}`} />
-            <StatItem icon="clock-outline" label="Giờ online" value={`${stats.hours}h`} />
-            <StatItem icon="map-marker-distance" label="Quãng đường" value={`${stats.km} km`} />
-            <StatItem icon="gift" label="Thưởng" value={`${fmtVND(stats.bonus)}đ`} />
-          </View>
+          {isLoading ? (
+            <View className="py-6 items-center">
+              <ActivityIndicator color="#2563EB" />
+            </View>
+          ) : isError ? (
+            <View className="py-6 items-center">
+              <Text className="text-sm text-gray-400 mb-2">Không tải được dữ liệu</Text>
+              <TouchableOpacity onPress={() => refetch()} activeOpacity={0.7}>
+                <Text className="text-sm font-semibold" style={{ color: '#2563EB' }}>Thử lại</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <>
+              <Text className="text-2xl font-extrabold text-gray-900 mt-1">{fmtVND(data?.grossAmount ?? 0)}đ</Text>
+
+              <View className="flex-row flex-wrap mt-4" style={{ rowGap: 16 }}>
+                <StatItem icon="car-sports" label="Chuyến" value={`${data?.tripCount ?? 0}`} />
+                <StatItem icon="clock-outline" label="Giờ online" value={`${fmtHours(data?.onlineSeconds ?? 0)}h`} />
+                <StatItem icon="map-marker-distance" label="Quãng đường" value={`${data?.distanceKm ?? 0} km`} />
+                <StatItem icon="cash-multiple" label="Thu nhập" value={`${fmtVND(data?.grossAmount ?? 0)}đ`} />
+              </View>
+            </>
+          )}
         </Card>
 
         {/* ── Biểu đồ tuần ── */}
@@ -133,30 +148,36 @@ export default function EarningsScreen() {
             <Text className="text-xs text-gray-400">nghìn đồng</Text>
           </View>
 
-          <View className="flex-row items-end justify-between" style={{ height: CHART_HEIGHT }}>
-            {WEEK_CHART.map((d, i) => {
-              const isToday = i === WEEK_CHART.length - 1;
-              const h = Math.max(6, (d.value / maxChart) * CHART_HEIGHT);
-              return (
-                <View key={d.day} className="items-center" style={{ flex: 1 }}>
-                  <Text className="text-[10px] font-semibold mb-1" style={{ color: isToday ? '#2563EB' : '#9ca3af' }}>
-                    {Math.round(d.value / 1000)}
-                  </Text>
-                  <View
-                    style={{
-                      width: 18,
-                      height: h,
-                      borderRadius: 6,
-                      backgroundColor: isToday ? '#2563EB' : '#dbeafe',
-                    }}
-                  />
-                  <Text className="text-[11px] mt-1.5" style={{ color: isToday ? '#2563EB' : '#9ca3af', fontWeight: isToday ? '700' : '400' }}>
-                    {d.day}
-                  </Text>
-                </View>
-              );
-            })}
-          </View>
+          {chart.length === 0 ? (
+            <View style={{ height: CHART_HEIGHT }} className="items-center justify-center">
+              <Text className="text-xs text-gray-400">Chưa có dữ liệu</Text>
+            </View>
+          ) : (
+            <View className="flex-row items-end justify-between" style={{ height: CHART_HEIGHT }}>
+              {chart.map((d, i) => {
+                const isToday = i === chart.length - 1;
+                const h = Math.max(6, (d.value / maxChart) * CHART_HEIGHT);
+                return (
+                  <View key={i} className="items-center" style={{ flex: 1 }}>
+                    <Text className="text-[10px] font-semibold mb-1" style={{ color: isToday ? '#2563EB' : '#9ca3af' }}>
+                      {Math.round(d.value / 1000)}
+                    </Text>
+                    <View
+                      style={{
+                        width: 18,
+                        height: h,
+                        borderRadius: 6,
+                        backgroundColor: isToday ? '#2563EB' : '#dbeafe',
+                      }}
+                    />
+                    <Text className="text-[11px] mt-1.5" style={{ color: isToday ? '#2563EB' : '#9ca3af', fontWeight: isToday ? '700' : '400' }}>
+                      {d.day}
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+          )}
         </Card>
 
         {/* ── Hoạt động gần đây ── */}
