@@ -5,17 +5,23 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import Mapbox from '@rnmapbox/maps';
 import RootNavigator from './src/navigation/RootNavigator';
+import { navigationRef } from './src/navigation/navigationRef';
 import { MAPBOX_PUBLIC_TOKEN } from './src/constants/config';
+import { usePushRegistration } from './src/shared/hooks/usePushRegistration';
 
 Mapbox.setAccessToken(MAPBOX_PUBLIC_TOKEN);
 
 const queryClient = new QueryClient();
 
 export default function App() {
+  // Đăng ký push token (FCM/APNs) + xử lý bấm notification — kênh dự phòng cho SignalR
+  // khi tài xế tắt app/mất kết nối hub. Gắn ở gốc app, không phụ thuộc màn hình nào.
+  usePushRegistration();
+
   return (
     <QueryClientProvider client={queryClient}>
       <SafeAreaProvider>
-        <NavigationContainer>
+        <NavigationContainer ref={navigationRef}>
           <RootNavigator />
         </NavigationContainer>
         <StatusBar style="light" />
