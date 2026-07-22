@@ -33,6 +33,27 @@ interface AuthState {
   _setHydrated: () => void;
 }
 
+// Chờ phiên đăng nhập nạp xong từ AsyncStorage/SecureStore. Dùng cho code chạy NGOÀI React
+// (task vị trí nền): OS có thể khởi động lại app ở chế độ nền, lúc đó store còn rỗng và
+// ensureFreshAccessToken() sẽ tưởng là chưa đăng nhập nếu gọi quá sớm.
+export function waitForAuthHydrated(timeoutMs = 3000): Promise<void> {
+  if (useAuthStore.getState()._hasHydrated) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      unsubscribe();
+      resolve();
+    }, timeoutMs);
+
+    const unsubscribe = useAuthStore.subscribe((s) => {
+      if (!s._hasHydrated) return;
+      clearTimeout(timer);
+      unsubscribe();
+      resolve();
+    });
+  });
+}
+
 export const useAuthStore = create<AuthState>()(
   persist(
     (set) => ({

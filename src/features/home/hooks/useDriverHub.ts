@@ -2,37 +2,33 @@ import { useEffect, useRef, useState } from 'react';
 import {
   startDriverHub,
   stopDriverHub,
-  invokeDriverHub,
   onDriverHubEvent,
   getDriverHubState,
   subscribeDriverHubState,
   type DriverHubState,
 } from '@services/signalr';
+import { startBackgroundLocation, stopBackgroundLocation } from '@services/location';
+import { useAppState } from '@shared/hooks/useAppState';
+import { useLocationBeacon } from './useLocationBeacon';
 
 // Tên event backend push chuyến mời tài xế. Nếu backend đặt tên khác
 // (vd "TripOffered", "ReceiveOffer") thì chỉ cần đổi hằng này.
 const OFFER_EVENT = 'offer';
 
-// Loại xe gửi kèm vị trí — backend dùng làm key cho set geo:online:{vehicleType}.
-// Tạm hardcode; sau này lấy từ hồ sơ tài xế.
-const VEHICLE_TYPE = 'car_auto';
-
-// Nhịp gửi vị trí lên hub khi đang trực tuyến (ms)
-const LOCATION_INTERVAL_MS = 5000;
-
 // Chờ bao lâu trước khi tự kết nối lại sau khi rơi về disconnected (ms)
 const RECONNECT_DELAY_MS = 5000;
 
 // Gắn vòng đời kết nối SignalR /hubs/driver vào toggle "Mở nhận chuyến":
-// online = true → kết nối hub + gửi vị trí (UpdateLocation) mỗi 5s; online = false → ngắt.
+// online = true → kết nối hub; online = false → ngắt.
+// Việc gửi vị trí do useLocationBeacon lo — nó tự chọn kênh SignalR hay HTTP tuỳ
+// app đang ở foreground hay background.
 // coords là vị trí hiện tại [lng, lat] theo chuẩn Mapbox. Trả về trạng thái kết nối cho UI.
 // Log kết nối thành công/thất bại nằm trong services/signalr/driverHub.ts.
 export function useDriverHub(online: boolean, coords: [number, number]): DriverHubState {
   const [hubState, setHubState] = useState<DriverHubState>(getDriverHubState());
 
-  // Ref để interval luôn đọc toạ độ mới nhất mà không phải reset timer mỗi lần GPS cập nhật.
-  const coordsRef = useRef(coords);
-  coordsRef.current = coords;
+  // Đăng ký AppState ở đúng một chỗ rồi truyền xuống, tránh 2 listener bắn log trùng nhau.
+  const { isBackground } = useAppState();
 
   useEffect(() => subscribeDriverHubState(setHubState), []);
 
@@ -45,61 +41,48 @@ export function useDriverHub(online: boolean, coords: [number, number]): DriverH
     }
   }, [online]);
 
+  // Nhận vị trí nền do OS chủ động đẩy — thứ DUY NHẤT gửi được vị trí khi app không hiển thị.
+  // Xin quyền phải làm lúc app đang mở nên buộc phải nằm ở đây chứ không phải trong task.
+  // KHÔNG tắt task khi unmount (khác hub): mục đích của nó chính là sống lâu hơn màn hình —
+  // chỉ tài xế bấm tắt nhận chuyến mới dừng.
+  useEffect(() => {
+    if (online) {
+      startBackgroundLocation().catch((err) => {
+        console.log('[LOC:BG] ✗ không bật được vị trí nền:', err);
+      });
+    } else {
+      stopBackgroundLocation().catch(() => {});
+    }
+  }, [online]);
+
+  // Vừa quay lại foreground mà hub chưa nối → thử lại NGAY, không chờ hết RECONNECT_DELAY_MS.
+  // Lúc này tài xế đang nhìn màn hình: mỗi giây chậm nhận event "offer" là một chuyến có thể mất.
+  const wasBackgroundRef = useRef(isBackground);
+  useEffect(() => {
+    const cameBack = wasBackgroundRef.current && !isBackground;
+    wasBackgroundRef.current = isBackground;
+    if (!cameBack || !online) return;
+    if (getDriverHubState() === 'connected') return;
+    console.log('[HUB] ⟳ App về foreground, SignalR đang rớt — kết nối lại NGAY (không chờ 5s)...');
+    startDriverHub().catch(() => {});
+  }, [isBackground, online]);
+
   // Lưới an toàn: đang mở nhận chuyến mà rơi hẳn về disconnected (server chủ động
   // đóng kết nối — trường hợp này SignalR KHÔNG tự reconnect — hoặc auto-reconnect
   // bỏ cuộc) → tự thử kết nối lại sau 5s, lặp tới khi vào được hoặc tài xế tắt toggle.
+  // Bỏ qua khi đang ở nền: kết nối gần như chắc chắn hỏng, thử lại chỉ tốn pin —
+  // effect phía trên sẽ nối lại ngay lúc quay về foreground.
   useEffect(() => {
-    if (!online || hubState !== 'disconnected') return;
+    if (!online || isBackground || hubState !== 'disconnected') return;
     const timer = setTimeout(() => {
-      console.log('[HUB] ⟳ vẫn đang mở nhận chuyến — tự kết nối lại...');
+      console.log('[HUB] ⟳ Vẫn đang mở nhận chuyến mà SignalR rớt — tự kết nối lại...');
       startDriverHub().catch(() => {});
     }, RECONNECT_DELAY_MS);
     return () => clearTimeout(timer);
-  }, [online, hubState]);
+  }, [online, isBackground, hubState]);
 
-  // Đang trực tuyến + hub đã kết nối → gửi vị trí ngay và lặp lại mỗi 5s.
-  // Mất kết nối (reconnecting/disconnected) thì effect tự dừng, kết nối lại thì tự chạy tiếp.
-  useEffect(() => {
-    if (!online || hubState !== 'connected') return;
-
-    const sendLocation = () => {
-      const [lng, lat] = coordsRef.current;
-      // invoke = 2 chiều: promise chỉ resolve khi server gửi completion về,
-      // tức hàm UpdateLocation() phía .NET đã chạy xong không lỗi.
-      invokeDriverHub('UpdateLocation', {
-        lat,
-        lng,
-        vehicleType: VEHICLE_TYPE,
-        heading: 0,
-        speed: 0,
-      })
-        .then(() => {
-          if (__DEV__) {
-            console.log(
-              `[HUB] ✓ UpdateLocation — server ĐÃ XỬ LÝ (${lat.toFixed(5)}, ${lng.toFixed(5)})`,
-            );
-          }
-        })
-        .catch((err) => {
-          // Gửi trúng lúc rớt kết nối ≠ server từ chối: auto-reconnect sẽ nối lại và
-          // effect tự bắn nhịp mới ngay khi connected — chỉ ghi nhận, không báo động.
-          if (getDriverHubState() !== 'connected') {
-            console.log('[HUB] ↷ bỏ qua 1 nhịp vị trí (đang mất kết nối, sẽ gửi lại sau reconnect)');
-            return;
-          }
-          // console.log để LogBox không bung toast đỏ — message chứa exception từ server
-          // (rõ hơn nếu backend bật EnableDetailedErrors ở môi trường dev).
-          console.log(
-            '[HUB] ✗ UpdateLocation bị từ chối:',
-            err instanceof Error ? err.message : err,
-          );
-        });
-    };
-
-    sendLocation();
-    const timer = setInterval(sendLocation, LOCATION_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [online, hubState]);
+  // Nhịp gửi vị trí: SignalR khi foreground, HTTP heartbeat khi ở nền.
+  useLocationBeacon({ online, coords, hubState, isBackground });
 
   // Rời màn hình / unmount thì ngắt kết nối để không giữ socket mồ côi.
   useEffect(() => {

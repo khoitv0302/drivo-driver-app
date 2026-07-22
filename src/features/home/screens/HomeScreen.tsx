@@ -19,6 +19,7 @@ import type { MainTabScreenProps } from '../../../navigation/types';
 import IncomingTripCard, { type IncomingTrip } from '../components/IncomingTripCard';
 import { useStatusBarStyle } from '../../../shared/hooks/useStatusBarStyle';
 import { useDriverHub, useDriverHubOffer } from '../hooks/useDriverHub';
+import { useDriverStore } from '@store/driver.store';
 import { parseTripOffer, offerToIncomingTrip, type ActiveOffer } from '../types';
 import { useAcceptOffer } from '../api/useAcceptOffer';
 import { useDeclineOffer } from '../api/useDeclineOffer';
@@ -47,7 +48,10 @@ export default function HomeScreen({ navigation }: MainTabScreenProps<'Home'>) {
   useStatusBarStyle('dark');
   const cameraRef = useRef<Mapbox.Camera>(null);
   const [userCoords, setUserCoords] = useState<[number, number]>(HCM_FALLBACK);
-  const [online, setOnline] = useState(false);
+  // Nằm ở store (persist) chứ không phải useState: task vị trí nền chạy ngoài cây React và
+  // phải đọc được trạng thái này kể cả khi OS đã kill rồi khởi động lại app ở chế độ nền.
+  const online = useDriverStore((s) => s.online);
+  const toggleOnline = useDriverStore((s) => s.toggleOnline);
   const locationSet = useRef(false);
 
   // Mở nhận chuyến → kết nối SignalR /hubs/driver + gửi vị trí mỗi 5s; tắt → ngắt kết nối.
@@ -326,7 +330,7 @@ export default function HomeScreen({ navigation }: MainTabScreenProps<'Home'>) {
         <TouchableOpacity
           style={[styles.onlineBtn, online ? styles.onlineBtnOn : styles.onlineBtnOff]}
           activeOpacity={0.9}
-          onPress={() => setOnline((v) => !v)}
+          onPress={toggleOnline}
         >
           <Ionicons name="power" size={20} color="white" />
           <Text style={styles.onlineText}>{online ? 'Đang trực tuyến' : 'Mở nhận chuyến'}</Text>

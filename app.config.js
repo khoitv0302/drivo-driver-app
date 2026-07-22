@@ -36,6 +36,10 @@ module.exports = {
         'Drivo cần truy cập vị trí để xác định vị trí của bạn và tìm chuyến gần bạn.',
       NSLocationAlwaysAndWhenInUseUsageDescription:
         'Drivo cần truy cập vị trí để tài khách hàng theo dõi hành trình khi bạn đang chở khách.',
+      // Bắt buộc để iOS đánh thức JS gửi vị trí khi app ở nền/khoá màn hình. Thiếu key này,
+      // iOS suspend JS trong vài giây sau khi vào nền → setInterval ngừng chạy → mất vị trí
+      // (đã đo được thực tế: chỉ gửi được đúng 1 nhịp rồi im).
+      UIBackgroundModes: ['location'],
       NSAppTransportSecurity: {
         NSExceptionDomains: {
           'sslip.io': {
@@ -59,7 +63,16 @@ module.exports = {
     softwareKeyboardLayoutMode: 'pan',
     predictiveBackGestureEnabled: false,
     package: 'com.thanhtv62929.drivodriverapp',
-    permissions: ['android.permission.ACCESS_FINE_LOCATION', 'android.permission.ACCESS_COARSE_LOCATION'],
+    permissions: [
+      'android.permission.ACCESS_FINE_LOCATION',
+      'android.permission.ACCESS_COARSE_LOCATION',
+      // Chạy nền: Android bắt buộc foreground service (kèm notification thường trực) mới được
+      // lấy vị trí liên tục khi app không hiển thị. FOREGROUND_SERVICE_LOCATION là yêu cầu
+      // riêng của Android 14+.
+      'android.permission.ACCESS_BACKGROUND_LOCATION',
+      'android.permission.FOREGROUND_SERVICE',
+      'android.permission.FOREGROUND_SERVICE_LOCATION',
+    ],
     ...(hasGoogleServicesFile ? { googleServicesFile: GOOGLE_SERVICES_FILE } : {}),
   },
   web: {
@@ -67,7 +80,20 @@ module.exports = {
   },
   plugins: [
     'expo-secure-store',
-    'expo-location',
+    [
+      'expo-location',
+      {
+        // 3 cờ này mới là thứ sinh ra entitlement/permission cho chế độ nền lúc prebuild —
+        // khai báo Info.plist/permissions ở trên là chưa đủ.
+        isIosBackgroundLocationEnabled: true,
+        isAndroidBackgroundLocationEnabled: true,
+        isAndroidForegroundServiceEnabled: true,
+        locationWhenInUsePermission:
+          'Drivo cần vị trí của bạn để tìm chuyến gần bạn và tính lộ trình chính xác.',
+        locationAlwaysAndWhenInUsePermission:
+          'Drivo cần vị trí kể cả khi bạn tắt màn hình, để khách theo dõi được hành trình và hệ thống ghép chuyến gần bạn nhất.',
+      },
+    ],
     '@rnmapbox/maps',
     'expo-font',
     'expo-notifications',

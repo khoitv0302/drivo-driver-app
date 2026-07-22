@@ -65,8 +65,10 @@ function getConnection(): HubConnection {
       // Bỏ bước negotiate (HTTP POST /hubs/driver/negotiate) — mở thẳng WebSocket.
       // Trên RN, POST negotiate hay fail "Network request failed" (chập chờn qua proxy sslip.io)
       // dù chính WebSocket lại kết nối được → cả kết nối chết oan. Bỏ negotiate = né hẳn bước đó.
-      // Chỉ hợp lệ với backend .NET tự host (không phải Azure SignalR Service) — đúng như setup hiện tại;
-      // token khi đó đi thẳng vào query ?access_token= của WebSocket qua accessTokenFactory bên dưới.
+      // Chỉ hợp lệ với backend .NET tự host (không phải Azure SignalR Service) — đúng như setup hiện tại.
+      // Token đi kèm cách nào: trên React Native, WebSocketTransport gắn nó vào HEADER
+      // "Authorization: Bearer ..." (không phải query ?access_token= như trên browser) —
+      // xem node_modules/@microsoft/signalr/dist/cjs/WebSocketTransport.js, nhánh Platform.isReactNative.
       skipNegotiation: true,
       // Gọi ở MỌI lần negotiate — cả lần start đầu lẫn từng lần auto-reconnect (chỗ
       // startWithAuthRetry bên dưới không với tới được). Dùng chung ensureFreshAccessToken() với
@@ -99,20 +101,37 @@ function getConnection(): HubConnection {
 
 // ── API công khai ────────────────────────────────────────────────────────────
 
-function is401(err: unknown): boolean {
-  // SignalR gói lỗi negotiate thành Error với message chứa "Status code '401'".
-  return err instanceof Error && err.message.includes("401");
+// Vì skipNegotiation = true, KHÔNG có bước negotiate qua HTTP để đọc status code. Token đi
+// trong query ?access_token= của chính lời gọi WebSocket, nên khi [Authorize] của hub từ chối,
+// thư viện chỉ ném ra đúng một câu chung chung:
+//   "WebSocket failed to connect. The connection could not be found on the server, ..."
+// Không có chữ "401" nào trong đó. Lọc theo "401" như trước sẽ bỏ sót ĐÚNG trường hợp
+// token hết hạn — hub cứ thế retry 5s/lần vĩnh viễn bằng một token đã chết.
+// Nên coi mọi lỗi mở WebSocket là NGHI VẤN auth và thử refresh đúng 1 lần.
+function mayBeAuthFailure(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return err.message.includes('401') || err.message.includes('WebSocket failed to connect');
 }
 
-// start + tự cứu khi 401: negotiate không đi qua interceptor axios nên access token
-// hết hạn sẽ không được tự refresh → refresh thủ công rồi thử lại đúng 1 lần.
+// Chặn refresh dồn dập khi nguyên nhân thật ra là transport (proxy chặn WS, mất sóng):
+// lỗi loại đó lặp lại mỗi 5s, không đáng để gọi /auth/refresh mỗi lần.
+let lastAuthRetryAt = 0;
+const AUTH_RETRY_COOLDOWN_MS = 60_000;
+
+// start + tự cứu khi nghi token hỏng: WebSocket upgrade không đi qua interceptor axios nên
+// access token hết hạn sẽ không được tự refresh → refresh thủ công rồi thử lại đúng 1 lần.
 async function startWithAuthRetry(hub: HubConnection): Promise<void> {
   try {
     await hub.start();
   } catch (err) {
-    if (!is401(err) || !useAuthStore.getState().refreshToken) throw err;
+    if (!mayBeAuthFailure(err) || !useAuthStore.getState().refreshToken) throw err;
+    if (Date.now() - lastAuthRetryAt < AUTH_RETRY_COOLDOWN_MS) {
+      console.log('[HUB] mở WebSocket thất bại — vừa refresh token gần đây, lần này coi là lỗi mạng/proxy');
+      throw err;
+    }
+    lastAuthRetryAt = Date.now();
 
-    console.log('[HUB] 401 — access token hết hạn, refresh rồi kết nối lại...');
+    console.log('[HUB] mở WebSocket thất bại — nghi token hết hạn, refresh rồi kết nối lại...');
     try {
       await forceRefreshAccessToken();
     } catch (refreshErr) {
@@ -136,8 +155,19 @@ export async function startDriverHub(): Promise<void> {
   const hub = getConnection();
   if (hub.state !== HubConnectionState.Disconnected) return;
 
-  const { token, roles, driverStatus } = useAuthStore.getState();
+  const { roles, driverStatus } = useAuthStore.getState();
   setState('connecting');
+
+  // Lấy token TRƯỚC khi mở WebSocket (chủ động refresh nếu sắp hết hạn — cùng hàm mà
+  // accessTokenFactory dùng). Không có token thì mở WS chỉ tổ nhận lỗi transport chung chung,
+  // che mất nguyên nhân thật là "chưa đăng nhập / phiên đã hết hạn".
+  const token = await ensureFreshAccessToken();
+  if (!token) {
+    setState('disconnected');
+    console.log('[HUB] ✗ chưa có access token hợp lệ — bỏ qua lần kết nối này (phiên hết hạn?)');
+    throw new Error('NO_ACCESS_TOKEN');
+  }
+
   if (__DEV__) {
     console.log(
       `[HUB] → đang kết nối ${DRIVER_HUB_URL} (token: ${token ? 'có' : 'KHÔNG CÓ'}, roles: [${roles.join(', ')}], driverStatus: ${driverStatus})`,

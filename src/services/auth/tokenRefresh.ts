@@ -55,7 +55,17 @@ export async function ensureFreshAccessToken(): Promise<string | null> {
 
   try {
     return await refreshAccessToken();
-  } catch {
+  } catch (err) {
+    // PHÂN BIỆT hai loại thất bại — trước đây gộp chung và đăng xuất cho cả hai:
+    //   • server TỪ CHỐI (có response 4xx): refresh token chết thật → phiên hết hạn → đăng xuất.
+    //   • LỖI MẠNG (không có response): mất sóng, proxy chập chờn, vừa ra khỏi nền...
+    //     Đăng xuất ở đây là oan — tài xế đang chạy chuyến bị đá về màn Đăng nhập chỉ vì
+    //     rớt sóng đúng lúc token sắp hết hạn. Giữ phiên, trả null, để lần gọi sau thử lại.
+    if (axios.isAxiosError(err) && !err.response) {
+      console.log('[Auth] ✗ refresh lỗi mạng — GIỮ phiên đăng nhập, sẽ thử lại ở lần gọi sau');
+      return null;
+    }
+    console.log('[Auth] ✗ refresh bị server từ chối — phiên hết hạn, quay về màn Đăng nhập');
     useAuthStore.getState().clearToken();
     return null;
   }
