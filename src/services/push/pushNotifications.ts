@@ -43,18 +43,20 @@ export async function requestPushPermission(): Promise<boolean> {
 
 // Lấy FCM registration token THẬT (không phải raw APNs token) — react-native-firebase tự đổi
 // APNs token → FCM token trên iOS (bước mà Google chỉ hỗ trợ qua Firebase SDK gốc, không có
-// cách nào làm thủ công/qua server). Nhờ vậy backend dùng đúng 1 luồng Firebase Admin SDK
-// gửi thẳng tới token này cho CẢ Android lẫn iOS — không cần phân biệt theo platform.
-// Đổi sang Azure Notification Hub sau này: chỉ backend đổi nơi gửi, FE không cần đổi gì.
-export async function getDevicePushToken(): Promise<{ token: string; platform: PushPlatform } | null> {
+// cách nào làm thủ công/qua server). Nhờ vậy CẢ Android lẫn iOS đều đăng ký lên Azure
+// Notification Hub với platform 'fcmv1' + FCM token, không cần nhánh riêng cho iOS:
+// hub cấu hình credential FCM v1, còn Firebase đã nạp APNs Auth Key nên tự relay sang APNs.
+// Nếu sau này hub đổi sang cắm thẳng chứng chỉ APNs thì mới cần nhánh iOS trả
+// { platform: 'apns', pnsHandle: getAPNSToken() } — lúc đó chỉ sửa đúng hàm này.
+export async function getDevicePushToken(): Promise<{ pnsHandle: string; platform: PushPlatform } | null> {
   const granted = await requestPushPermission();
   if (!granted) return null;
 
   await ensureAndroidChannel();
 
-  const token = await getToken(messagingInstance());
-  if (__DEV__) console.log(`[PUSH] 🔑 FCM token (${Platform.OS}):`, token);
-  return { token, platform: Platform.OS === 'ios' ? 'ios' : 'android' };
+  const pnsHandle = await getToken(messagingInstance());
+  if (__DEV__) console.log(`[PUSH] 🔑 FCM token (${Platform.OS}):`, pnsHandle);
+  return { pnsHandle, platform: 'fcmv1' };
 }
 
 // Token có thể bị FCM đổi giữa phiên (hiếm) — đăng ký lại với backend ngay khi đổi.

@@ -8,6 +8,6 @@ export {
   registerBackgroundMessageHandler,
 } from './pushNotifications';
 
-export { registerDeviceToken, unregisterDeviceToken } from './pushTokenRegistration';
+export { registerDeviceInstallation, deleteDeviceInstallation } from './deviceInstallation';
 
-export type { PushPlatform, PushProvider, RegisterDeviceTokenPayload } from './types';
+export type { PushPlatform, DeviceInstallationPayload } from './types';

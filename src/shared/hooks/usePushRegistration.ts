@@ -1,15 +1,15 @@
 import { useEffect } from 'react';
-import { Platform } from 'react-native';
 import { useAuthStore } from '@store/auth.store';
 import { ROUTES } from '@constants/routes';
 import { navigationRef } from '@navigation/navigationRef';
+import { getOrCreateInstallationId } from '@services/storage/installationStorage';
 import {
   getDevicePushToken,
   onPushTokenRotated,
   onNotificationReceived,
   onRemoteNotificationTapped,
   getInitialRemoteNotification,
-  registerDeviceToken,
+  registerDeviceInstallation,
   type PushPlatform,
 } from '@services/push';
 
@@ -21,11 +21,10 @@ function navigateToOffer(): void {
   }
 }
 
-// Đăng ký device push token (FCM — cả Android lẫn iOS, xem services/push/pushNotifications.ts)
-// với backend khi đã đăng nhập — kênh dự phòng cho SignalR (services/signalr): tài xế tắt hẳn
-// app hoặc mất kết nối hub vẫn nhận được thông báo có chuyến qua notification hệ thống. Gắn 1
-// lần ở gốc app (App.tsx); không phụ thuộc toggle "Mở nhận chuyến" vì điều phối viên có thể
-// gán chuyến thủ công bất cứ lúc nào.
+// Đăng ký device installation lên Azure Notification Hub (qua backend) — kênh dự phòng cho
+// SignalR (services/signalr): tài xế tắt hẳn app hoặc mất kết nối hub vẫn nhận được thông báo có
+// chuyến qua notification hệ thống. Gắn 1 lần ở gốc app (App.tsx); không phụ thuộc toggle
+// "Mở nhận chuyến" vì điều phối viên có thể gán chuyến thủ công bất cứ lúc nào.
 export function usePushRegistration(): void {
   const token = useAuthStore((s) => s.token);
   const hasHydrated = useAuthStore((s) => s._hasHydrated);
@@ -38,10 +37,14 @@ export function usePushRegistration(): void {
       const device = await getDevicePushToken();
       if (!device || cancelled) return;
       try {
-        await registerDeviceToken({ token: device.token, platform: device.platform, provider: 'fcm' });
-        if (__DEV__) console.log(`[PUSH] ✓ đã đăng ký device token (${device.platform})`);
+        // installationId phải lấy SAU khi chắc chắn có handle, để máy từ chối quyền push
+        // không tạo ra installation rỗng trên hub.
+        const installationId = await getOrCreateInstallationId();
+        if (cancelled) return;
+        await registerDeviceInstallation({ installationId, ...device });
+        if (__DEV__) console.log(`[PUSH] ✓ đã đăng ký installation ${installationId} (${device.platform})`);
       } catch (err) {
-        console.log('[PUSH] ✗ đăng ký device token thất bại:', err instanceof Error ? err.message : err);
+        console.log('[PUSH] ✗ đăng ký installation thất bại:', err instanceof Error ? err.message : err);
       }
     })();
 
@@ -50,12 +53,18 @@ export function usePushRegistration(): void {
     };
   }, [hasHydrated, token]);
 
-  // Token FCM có thể bị đổi giữa phiên (hiếm) — đăng ký lại ngay với backend khi đổi.
+  // FCM có thể xoay token giữa phiên — PUT lại cùng installationId để hub cập nhật pnsHandle mới
+  // (ghi đè bản ghi cũ, không tạo installation mới).
   useEffect(() => {
     if (!hasHydrated || !token) return;
-    const platform: PushPlatform = Platform.OS === 'ios' ? 'ios' : 'android';
-    return onPushTokenRotated((newToken) => {
-      registerDeviceToken({ token: newToken, platform, provider: 'fcm' }).catch(() => {});
+    const platform: PushPlatform = 'fcmv1';
+    return onPushTokenRotated(async (newToken) => {
+      try {
+        const installationId = await getOrCreateInstallationId();
+        await registerDeviceInstallation({ installationId, platform, pnsHandle: newToken });
+      } catch {
+        // Best-effort: lần mở app sau effect đăng ký ở trên sẽ đẩy lại handle mới nhất.
+      }
     });
   }, [hasHydrated, token]);
 
